@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Private Router Manager - User Guide</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; line-height: 1.6; max-width: 48rem; margin: 0 auto; padding: 2rem; color: #333; }
+    h1 { color: #1a1a1a; border-bottom: 2px solid #0066cc; padding-bottom: 0.5rem; scroll-margin-top: 0.5rem; }
+    h2 { color: #0066cc; margin-top: 2rem; scroll-margin-top: 0.5rem; }
+    h3 { color: #444; margin-top: 1.5rem; scroll-margin-top: 0.5rem; }
+    code { background: #f0f0f0; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.9em; }
+    ul { padding-left: 1.5rem; }
+    li { margin-bottom: 0.5rem; }
+    .tip { background: #e8f4fc; border-left: 4px solid #0066cc; padding: 1rem; margin: 1rem 0; }
+    .warning { background: #fff8e6; border-left: 4px solid #e6a800; padding: 1rem; margin: 1rem 0; }
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+    th, td { border: 1px solid #ccc; padding: 0.5rem 0.75rem; text-align: left; }
+    th { background: #f5f5f5; font-weight: 600; }
+    .toc { background: #f8f9fa; border: 1px solid #ddd; border-radius: 6px; padding: 1rem 1.25rem; margin: 1.5rem 0; }
+    .toc strong { display: block; margin-bottom: 0.5rem; color: #0066cc; }
+    .toc ul { list-style: none; padding-left: 0; margin: 0; }
+    .toc > ul > li { margin-bottom: 0.35rem; }
+    .toc ul ul { padding-left: 1rem; margin: 0.25rem 0 0.5rem; }
+    .toc a { color: #0066cc; text-decoration: none; }
+    .toc a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+
+<h1 id="user-guide">Private Router Manager — User Guide</h1>
+
+<p>This guide explains how to use each feature of the Private Router Manager.</p>
+
+<nav class="toc">
+  <strong>Table of Contents</strong>
+  <ul>
+    <li><a href="#credentials-settings">1. Credentials &amp; Settings</a></li>
+    <li><a href="#routers-table">2. Routers Table</a>
+      <ul>
+        <li><a href="#toolbar-actions">2.1 Toolbar — Primary Actions</a></li>
+        <li><a href="#file-operations">2.2 File Operations</a></li>
+        <li><a href="#row-selection">2.3 Row Selection</a></li>
+        <li><a href="#poll-routers">2.4 Poll Routers</a></li>
+        <li><a href="#router-file-lock">2.5 Router File Lock</a></li>
+        <li><a href="#sorting-pagination">2.6 Sorting, Pagination, Columns</a></li>
+      </ul>
+    </li>
+    <li><a href="#deployment-tab">3. Deployment Tab</a>
+      <ul>
+        <li><a href="#deployment-types">3.1 Deployment Types</a></li>
+        <li><a href="#how-to-deploy">3.2 How to Deploy</a></li>
+        <li><a href="#ncos-download">3.3 NCOS Download from NetCloud</a></li>
+        <li><a href="#sdk-apps">3.4 SDK Apps</a></li>
+      </ul>
+    </li>
+    <li><a href="#monitoring-tab">4. Monitoring Tab</a>
+      <ul>
+        <li><a href="#ping">4.1 Ping</a></li>
+        <li><a href="#router-api">4.2 Router API</a></li>
+        <li><a href="#backup-configurations">4.3 Backup Configurations</a></li>
+      </ul>
+    </li>
+    <li><a href="#logs-csv-tab">5. Logs and CSV Tab</a></li>
+    <li><a href="#folders">6. Folders</a></li>
+  </ul>
+</nav>
+
+<h2 id="credentials-settings">1. Credentials & Settings</h2>
+
+<p>Each router row has its own <code>username</code>, <code>password</code>, and <code>port</code> (default 8080). Credentials are stored in the routers file. Use <strong>Discover Routers</strong> to add routers with shared credentials, or edit cells directly.</p>
+
+<p>Open <strong>Settings</strong> (gear icon) to set connection timeout and retries used for Discover, Poll Routers, and Router API. Settings are saved in <code>app_config.json</code>.</p>
+
+<h2 id="routers-table">2. Routers Table</h2>
+
+<h3 id="toolbar-actions">2.1 Toolbar — Primary Actions</h3>
+
+<ul>
+  <li><strong>Discover Routers</strong> — Find routers by IP subnet or range (e.g. 192.168.1.0/24). Uses credentials you provide.</li>
+  <li><strong>Lock button</strong> — Shows the current filename (e.g. <code>routers.json</code>) with a lock icon. Red when unlocked, green when locked. Click to lock or unlock the file.</li>
+</ul>
+
+<h3 id="file-operations">2.2 File Operations</h3>
+
+<ul>
+  <li><strong>New</strong> — Start a fresh routers file with no rows.</li>
+  <li><strong>Open</strong> — Load a JSON file from the <code>routers/</code> folder.</li>
+  <li><strong>Upload Routers File</strong> — Upload a JSON or CSV file from your computer.</li>
+  <li><strong>Download Routers File</strong> — Download the current table as JSON.</li>
+  <li><strong>Save</strong> — Save changes to the current file.</li>
+  <li><strong>Save As</strong> — Save to a new filename.</li>
+  <li><strong>Add Row</strong> — Add a new blank row.</li>
+  <li><strong>Add Column</strong> — Add a custom column (e.g. for deploy results).</li>
+</ul>
+
+<p class="warning"><strong>Required:</strong> Each router must have an <code>ip_address</code> column.</p>
+
+<h3 id="row-selection">2.3 Row Selection</h3>
+
+<p>The first column contains checkboxes for selecting rows:</p>
+
+<ul>
+  <li><strong>Select All</strong> (header checkbox) — Selects or deselects all routers across all pages. Tooltip explains it selects routers even if not currently visible.</li>
+  <li><strong>Per-row checkboxes</strong> — Select or deselect individual routers.</li>
+</ul>
+
+<p>Selection is used by <strong>Poll Routers</strong>, <strong>Backup Configurations</strong>, <strong>Deploy</strong>, and <strong>Router API</strong>. Only selected routers are processed. Row selection (including per-row checkboxes) remains available when the file is locked.</p>
+
+<h3 id="poll-routers">2.4 Poll Routers</h3>
+
+<p>Fetches Hostname, MAC Address, Serial Number, Product Name, NCOS version, and any API path columns (added via Router API Copy to Routers) from each router. Results are written into the routers table.</p>
+
+<p><strong>Manual poll:</strong> Select routers and click <strong>Poll Routers</strong>. If all are selected, a confirmation dialog appears.</p>
+
+<p><strong>Auto poll:</strong> Check <strong>Auto</strong> and set the interval in <strong>minutes</strong> (default 60). Polling runs automatically in the background for all routers. Auto is on by default. The Poll Routers button stays available when the file is locked; the Auto checkbox and minutes input are disabled when locked.</p>
+
+<h3 id="router-file-lock">2.5 Router File Lock</h3>
+
+<p>The lock button displays the filename and lock state (red when unlocked, green when locked). It protects the routers list from accidental changes:</p>
+
+<ul>
+  <li><strong>Unlocked</strong> — All editing, file buttons, Poll Routers, and Backup Configurations are enabled. You can add/delete columns.</li>
+  <li><strong>Locked</strong> — File operation buttons (New, Open, Save, Add Row, Add Column) are hidden. Discover Routers and Backup Configurations are disabled. Poll Routers stays enabled; Auto and minutes are disabled. Cell editing and row deletion are blocked. Custom column delete (× on headers) is hidden. Row selection (checkboxes) remains enabled. Sorting, scrolling, and pagination remain available.</li>
+</ul>
+
+<p>Click to lock; click again to unlock (a confirmation dialog appears). Lock state persists across page refreshes.</p>
+
+<h3 id="sorting-pagination">2.6 Sorting, Pagination, Columns</h3>
+
+<ul>
+  <li><strong>Sorting</strong> — Click a column header to sort. An arrow (↑/↓) shows the active column and direction. Two-level sort is supported.</li>
+  <li><strong>Pagination</strong> — Use the pagination bar above and below the table. Choose rows per page (25, 50, 100, 200, 500).</li>
+  <li><strong>Column resize</strong> — Drag the right edge of any column header to adjust width.</li>
+  <li><strong>Delete column</strong> — When unlocked, custom columns (e.g. from Router API Copy to Routers) show a × button in the header. Click to remove the column from all routers. Standard columns cannot be deleted.</li>
+</ul>
+
+<h2 id="deployment-tab">3. Deployment Tab</h2>
+
+<p>In the right-hand drawer, the Deployment tab lets you deploy files to routers.</p>
+
+<h3 id="deployment-types">3.1 Deployment Types</h3>
+
+<table>
+  <tr><th>Type</th><th>Purpose</th><th>File</th></tr>
+  <tr><td>Licenses</td><td>Deploy license files</td><td>.lic</td></tr>
+  <tr><td>NCOS</td><td>Deploy firmware images</td><td>.bin</td></tr>
+  <tr><td>Configuration</td><td>Deploy config backups</td><td>.bin</td></tr>
+  <tr><td>SDK Apps</td><td>Deploy app packages via SCP</td><td>.tar.gz</td></tr>
+</table>
+
+<h3 id="how-to-deploy">3.2 How to Deploy</h3>
+
+<ol>
+  <li>Select one or more routers in the table.</li>
+  <li>Select deployment type from the dropdown.</li>
+  <li>Upload a file or choose from existing files in the folder.</li>
+  <li>Click <strong>Deploy</strong>. If all routers are selected, a confirmation dialog appears.</li>
+</ol>
+
+<p><strong>Delete</strong> — Select a file and click Delete to remove it from the current deployment folder (licenses, NCOS, configs, or sdk_apps). A confirmation dialog appears before the file is permanently deleted.</p>
+
+<p>Results are added as a new column in your routers table. The column header includes timestamp, type, and filename.</p>
+
+<h3 id="ncos-download">3.3 NCOS Download from NetCloud</h3>
+
+<p>When NCOS is selected, you can download firmware from NetCloud:</p>
+
+<ol>
+  <li>Expand <strong>Download from NetCloud</strong>.</li>
+  <li>Enter API keys (or load from environment / <code>api_keys.json</code>).</li>
+  <li>Enter version (e.g. <code>7.22.60</code>) and optional model (e.g. <code>ibr900</code>).</li>
+  <li>Click <strong>Search NCOS</strong>, select a firmware, and download.</li>
+</ol>
+
+<h3 id="sdk-apps">3.4 SDK Apps</h3>
+
+<p>SDK apps are deployed via SCP to <code>/app_upload</code> on each router. The router's <code>port</code> in the table is the HTTP admin port (for the web UI and REST API); SDK deploy uses a separate <strong>SSH port</strong> field (default 22). Configure it if your router uses a non-standard SSH/SCP port.</p>
+
+<p>Uses <code>sshpass</code> on macOS/Linux and PuTTY <code>pscp</code> on Windows.</p>
+
+<h2 id="monitoring-tab">4. Monitoring Tab</h2>
+
+<h3 id="ping">4.1 Ping</h3>
+
+<p>Ping routers to check connectivity:</p>
+
+<ul>
+  <li><strong>Ping</strong> — Send 5 pings per router. Results show IP, Hostname, Status, Tx, Rx, Loss %, and latency (Min/Avg/Max). Sort arrows indicate the active sort column.</li>
+  <li><strong>Auto</strong> — Check to run ping automatically at the interval (seconds) you specify.</li>
+  <li><strong>Log Offline Events</strong> — When checked, writes offline/online events to a log file (default: <code>Offline Events.log</code>). When a router goes offline, a line is written with Offline Time. When it comes back, the Online Time is updated.</li>
+</ul>
+
+<p>Results are sortable and paginated. Ping results and Auto state persist across refreshes. When ping updates router status, the routers table scroll position is preserved.</p>
+
+<h3 id="router-api">4.2 Router API</h3>
+
+<p>Make calls to the router API across multiple routers at once. Runs on <strong>selected</strong> routers only. Select one or more routers, then run GET, PUT, POST, or DELETE. If all routers are selected, a confirmation dialog appears.</p>
+
+<p>Options:</p>
+
+<ul>
+  <li><strong>Method</strong> — GET, PUT, POST, or DELETE.</li>
+  <li><strong>GET</strong> — Enter API paths (comma or space separated). Paths are prefixed with <code>/api/</code> (e.g. <code>status/gps</code> → <code>/api/status/gps</code>). Use <code>*</code> in paths for wildcard expansion (e.g. <code>status/wan/devices/mdm*/diagnostics</code>). Results show one column per path.</li>
+  <li><strong>PUT/POST</strong> — Enter path and JSON payload.</li>
+  <li><strong>DELETE</strong> — Enter path.</li>
+</ul>
+
+<p><strong>Result actions:</strong></p>
+<ul>
+  <li><strong>Copy to Routers</strong> — Click a column header to select it, then click Copy to Routers to add that column to your routers table (matched by IP). The new column appears in the table. Poll Routers will also fetch and update these API path columns when you run it.</li>
+  <li><strong>Save to CSV</strong> — Save all results to a CSV file in the <code>logs/</code> folder.</li>
+  <li><strong>Download CSV</strong> — Download results to your computer.</li>
+</ul>
+
+<p class="warning">Copy to Routers is disabled when the router file is locked.</p>
+
+<h3 id="backup-configurations">4.3 Backup Configurations</h3>
+
+<p>Save router configurations to the <code>configs/</code> folder. Use Deployment &gt; Configuration to restore configurations to routers.</p>
+
+<p>Select one or more routers, then click <strong>Backup</strong>. Results show a table with IP, Hostname, and Success (or error message). If all routers are selected, a confirmation dialog appears. Backup is disabled when the router file is locked.</p>
+
+<p>Files are named like <code>hostname_config_product_MM-DD-YYYY.bin</code>.</p>
+
+<h2 id="logs-csv-tab">5. Logs and CSV Tab</h2>
+
+<p>View and manage files in the <code>logs/</code> folder:</p>
+
+<ul>
+  <li><strong>Select</strong> — Choose a log or CSV file from the dropdown.</li>
+  <li><strong>View</strong> — File contents appear in the viewer.</li>
+  <li><strong>Download</strong> — Download the selected file.</li>
+  <li><strong>Rename</strong> — Rename the selected file. New name must end with <code>.log</code> or <code>.csv</code>.</li>
+  <li><strong>Delete</strong> — Delete the selected file (with confirmation).</li>
+</ul>
+
+<h2 id="folders">6. Folders</h2>
+
+<p>The app uses these folders (created automatically if missing):</p>
+
+<ul>
+  <li><code>routers/</code> — Router JSON files (default: <code>routers.json</code>)</li>
+  <li><code>logs/</code> — Logs (Discover, Poll Routers, Offline Events, etc.) and exported CSV files</li>
+  <li><code>licenses/</code> — License files</li>
+  <li><code>NCOS/</code> — Firmware images</li>
+  <li><code>configs/</code> — Saved router configurations</li>
+  <li><code>sdk_apps/</code> — SDK app archives</li>
+</ul>
+
+</body>
+</html>

@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Private Router Manager</title>
+  <link rel="icon" href="{{ url_for('static', filename='favicon.png') }}" type="image/png">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+  <header class="header">
+    <div class="header-brand">
+      <img src="{{ url_for('static', filename='logo.png') }}" alt="" class="header-logo header-logo-dark" aria-hidden="true">
+      <img src="{{ url_for('static', filename='logo_dark.png') }}" alt="" class="header-logo header-logo-light" aria-hidden="true">
+      <h1>Private Router Manager</h1>
+    </div>
+    <div class="header-actions">
+      <button type="button" class="btn-settings" id="settingsBtn" aria-label="Settings" title="Settings">⚙</button>
+      <button type="button" class="btn-help" id="helpBtn" aria-label="Help" title="Help">?</button>
+      <button type="button" class="theme-toggle" id="themeToggle" aria-label="Toggle light/dark mode" title="Toggle light/dark mode">☀</button>
+    </div>
+  </header>
+
+  <main class="main">
+    <section class="routers-section">
+      <div class="routers-toolbar" id="routersToolbar">
+        <div class="routers-toolbar-primary-row">
+          <button type="button" class="btn btn-lock btn-lock-unlocked btn-toolbar" id="btnRouterFileLock" title="UNLOCKED - click to lock routers"><span class="lock-icon">🔓</span> <span class="routers-filename" id="routersFilename">—</span></button>
+          <button type="button" class="btn btn-primary btn-toolbar" id="btnDiscoverRouters" title="Discover routers by IP subnet or range">Discover Routers</button>
+          <button type="button" class="btn btn-secondary btn-toolbar" id="btnPollRouters" title="Poll router info (hostname, MAC, API paths, etc.) for selected routers">Poll Routers</button>
+          <label class="checkbox-opt poll-auto-opt">
+            <input type="checkbox" id="pollAuto" title="Auto poll routers on schedule" checked>
+            Auto
+          </label>
+          <label class="poll-minutes-label">
+            <input type="number" id="pollIntervalMinutes" value="60" min="1" max="1440" title="Interval (minutes)" class="poll-interval-min">
+            minutes
+          </label>
+        </div>
+        <div class="toolbar-actions toolbar-actions-row1">
+          <button type="button" class="btn btn-secondary btn-toolbar" id="btnNewRouters">New</button>
+          <button type="button" class="btn btn-secondary btn-toolbar" id="btnOpen">Open</button>
+          <label class="btn btn-secondary btn-toolbar">
+            Upload Routers File
+            <input type="file" id="routersUpload" accept=".json,.csv" hidden>
+          </label>
+          <button type="button" class="btn btn-secondary btn-toolbar" id="btnDownload">Download Routers File</button>
+        </div>
+        <div class="toolbar-actions toolbar-actions-row2">
+          <button type="button" class="btn btn-secondary btn-toolbar" id="btnSave">Save</button>
+          <button type="button" class="btn btn-secondary btn-toolbar" id="btnSaveAs">Save As</button>
+          <button type="button" class="btn btn-secondary btn-toolbar" id="btnAddRow">Add Row</button>
+          <button type="button" class="btn btn-secondary btn-toolbar" id="btnAddCol">Add Column</button>
+        </div>
+      </div>
+
+      <div class="routers-editor-wrap">
+        <div class="routers-pagination routers-pagination-top" id="routersPaginationTop"></div>
+        <div class="routers-table-wrap" id="routersTableWrap">
+          <table class="routers-table" id="routersTable">
+            <thead id="routersHead"></thead>
+            <tbody id="routersBody"></tbody>
+          </table>
+        </div>
+        <div class="routers-pagination routers-pagination-bottom" id="routersPaginationBottom"></div>
+      </div>
+
+      <div class="empty-state" id="emptyState">
+        <p>No router data. Upload a routers file (.json) or use Discover Routers.</p>
+      </div>
+    </section>
+
+    <aside class="drawer" id="drawer">
+      <div class="drawer-tabs">
+        <button type="button" class="drawer-tab active" id="drawerTabDeployment" data-tab="deployment" aria-label="Deployment">
+          <span class="toggle-icon" id="drawerArrowDeployment">◀</span>
+          <span class="toggle-label">Deployment</span>
+        </button>
+        <button type="button" class="drawer-tab" id="drawerTabMonitoring" data-tab="monitoring" aria-label="Monitoring">
+          <span class="toggle-icon" id="drawerArrowMonitoring">▶</span>
+          <span class="toggle-label">Monitoring</span>
+        </button>
+        <button type="button" class="drawer-tab" id="drawerTabLogs" data-tab="logs" aria-label="Logs and CSV">
+          <span class="toggle-icon" id="drawerArrowLogs">▶</span>
+          <span class="toggle-label">Logs and CSV</span>
+        </button>
+      </div>
+      <div class="drawer-resize-handle" id="drawerResizeHandle" title="Drag to resize"></div>
+      <div class="drawer-content" id="drawerContent">
+        <div class="drawer-pane active" id="drawerPaneDeployment">
+          <div class="deploy-pane-header">
+            <h3>Deployment</h3>
+            <div class="deploy-subtabs">
+            <button type="button" class="deploy-subtab active" data-type="licenses">Licenses</button>
+            <button type="button" class="deploy-subtab" data-type="ncos">NCOS</button>
+            <button type="button" class="deploy-subtab" data-type="configuration">Configuration</button>
+            <button type="button" class="deploy-subtab" data-type="sdk_apps">SDK Apps</button>
+            </div>
+          </div>
+          <div class="deploy-pane-body">
+        <div class="ssh-port-field" id="sshPortField" style="display: none;">
+          <label for="sshPort">SSH port (for SDK Apps)</label>
+          <input type="number" id="sshPort" value="22" min="1" max="65535" placeholder="22">
+        </div>
+
+        <div class="file-upload" id="fileUploadSection">
+          <label for="deployFile">Upload file</label>
+          <input type="file" id="deployFile" hidden>
+          <button type="button" class="btn btn-secondary btn-block" id="btnUploadDeploy">Choose file to upload</button>
+        </div>
+
+        <div class="ncos-download" id="ncosDownloadSection" style="display: none;">
+          <button type="button" class="ncos-download-toggle" id="ncosDownloadToggle" aria-expanded="false">
+            <span class="ncos-toggle-icon">▶</span>
+            <span>Download from NetCloud</span>
+          </button>
+          <div class="ncos-download-content" id="ncosDownloadContent">
+            <div class="ncos-api-status" id="ncosApiStatus"></div>
+            <div class="ncos-api-keys">
+              <label>API Keys (required)</label>
+              <input type="password" id="ncosCpId" placeholder="X-CP-API-ID" autocomplete="off">
+              <input type="password" id="ncosCpKey" placeholder="X-CP-API-KEY" autocomplete="off">
+              <input type="password" id="ncosEcmId" placeholder="X-ECM-API-ID" autocomplete="off">
+              <input type="password" id="ncosEcmKey" placeholder="X-ECM-API-KEY" autocomplete="off">
+              <button type="button" class="btn btn-secondary btn-block" id="btnSaveNcosKeys">Save API Keys</button>
+            </div>
+            <div class="ncos-search">
+              <input type="text" id="ncosVersion" placeholder="Version (e.g. 7.22.60)">
+              <input type="text" id="ncosModel" placeholder="Model (e.g. ibr900)">
+<button type="button" class="btn btn-secondary btn-block" id="btnNcosSearch">Search NCOS</button>
+          </div>
+          <div class="ncos-firmware-list">
+            <label>Select NCOS</label>
+            <div class="ncos-select-wrap">
+              <select id="ncosFirmwareList" size="4"></select>
+            </div>
+              <button type="button" class="btn btn-secondary btn-block" id="btnNcosDownload">Download Selected</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="available-files" id="availableFilesSection">
+          <label>Available files</label>
+          <select id="availableFiles" size="5">
+            <!-- populated by JS -->
+          </select>
+        </div>
+
+        <div class="deploy-actions">
+          <button type="button" class="btn btn-primary" id="btnDeploy">Deploy</button>
+          <button type="button" class="btn btn-danger" id="btnDeleteDeployFile" title="Delete the selected file">Delete</button>
+        </div>
+          </div>
+        </div>
+
+        <div class="drawer-pane" id="drawerPaneMonitoring">
+          <h3>Monitoring</h3>
+          <div class="monitoring-subtabs">
+            <button type="button" class="monitoring-subtab active" id="monitoringTabPing" data-tab="ping">Ping</button>
+            <button type="button" class="monitoring-subtab" id="monitoringTabRemoteApi" data-tab="remote-api">Router API</button>
+            <button type="button" class="monitoring-subtab" id="monitoringTabBackup" data-tab="backup">Backup Configurations</button>
+          </div>
+
+          <div class="monitoring-subpane active" id="monitoringPanePing">
+            <p class="ping-description">Automatic ping monitoring updates router states and logs offline events.</p>
+            <div class="ping-controls-row">
+              <button type="button" class="btn btn-primary" id="btnPing">Ping</button>
+              <label class="checkbox-opt monitoring-auto">
+                <input type="checkbox" id="pingAuto">
+                Auto
+                <input type="number" id="pingInterval" value="30" min="1" placeholder="Interval (Seconds)" title="Interval (Seconds)">
+              </label>
+            </div>
+            <div class="ping-log-row">
+              <label class="checkbox-opt">
+                <input type="checkbox" id="pingLogOffline" checked>
+                Log Offline Events
+              </label>
+              <input type="text" id="pingLogFilename" value="Offline Events.log" placeholder="Log Filename" title="Log Filename">
+            </div>
+            <div class="monitoring-results-wrap">
+              <div class="pagination-bar-wrap" id="pingPaginationTop"></div>
+              <table class="monitoring-table" id="pingResultsTable">
+                <thead>
+                  <tr>
+                    <th class="sortable" data-sort="ip">IP<span class="sort-arrow" aria-hidden="true"></span></th>
+                    <th class="sortable" data-sort="hostname">Hostname<span class="sort-arrow" aria-hidden="true"></span></th>
+                    <th class="sortable" data-sort="status">Status<span class="sort-arrow" aria-hidden="true"></span></th>
+                    <th class="sortable" data-sort="tx">Tx<span class="sort-arrow" aria-hidden="true"></span></th>
+                    <th class="sortable" data-sort="rx">Rx<span class="sort-arrow" aria-hidden="true"></span></th>
+                    <th class="sortable" data-sort="loss_pct">Loss %<span class="sort-arrow" aria-hidden="true"></span></th>
+                    <th class="sortable" data-sort="min_ms">Min<span class="sort-arrow" aria-hidden="true"></span></th>
+                    <th class="sortable" data-sort="avg_ms">Avg<span class="sort-arrow" aria-hidden="true"></span></th>
+                    <th class="sortable" data-sort="max_ms">Max<span class="sort-arrow" aria-hidden="true"></span></th>
+                  </tr>
+                </thead>
+                <tbody id="pingResultsBody"></tbody>
+              </table>
+              <div class="pagination-bar-wrap" id="pingPaginationBottom"></div>
+            </div>
+          </div>
+
+          <div class="monitoring-subpane" id="monitoringPaneRemoteApi">
+            <p class="router-api-description">Make calls to the router API across multiple routers at once.</p>
+            <div class="remote-api-form">
+              <div class="remote-api-row">
+                <label for="remoteApiMethod">Method</label>
+                <select id="remoteApiMethod">
+                  <option value="GET">GET</option>
+                  <option value="PUT">PUT</option>
+                  <option value="POST">POST</option>
+                  <option value="DELETE">DELETE</option>
+                </select>
+              </div>
+              <div class="remote-api-row" id="remoteApiPathsRow">
+                <label for="remoteApiPaths">Paths (comma, space, or line separated; use * for wildcards)</label>
+                <textarea id="remoteApiPaths" rows="3" placeholder="status/wan/devices/mdm*/diagnostics/dbm&#10;status/system/sdk/apps/*/app/name" title="Use * for wildcard: fetches path before *, then expands. * = all keys. mdm* = keys starting with mdm. E.g. status/wan/devices/mdm*/diagnostics gets status/wan/devices, filters to mdm* devices, returns each diagnostics."></textarea>
+              </div>
+              <div class="remote-api-row" id="remoteApiPathRow" style="display: none;">
+                <label for="remoteApiPath">Path</label>
+                <input type="text" id="remoteApiPath" placeholder="e.g. config/gps">
+              </div>
+              <div class="remote-api-row" id="remoteApiPayloadRow" style="display: none;">
+                <label for="remoteApiPayload">Payload (JSON)</label>
+                <textarea id="remoteApiPayload" rows="4" placeholder='{"key": "value"}'></textarea>
+              </div>
+              <button type="button" class="btn btn-primary btn-block" id="btnRemoteApiGet">GET</button>
+              <button type="button" class="btn btn-primary btn-block" id="btnRemoteApiPut" style="display: none;">PUT</button>
+              <button type="button" class="btn btn-primary btn-block" id="btnRemoteApiPost" style="display: none;">POST</button>
+              <button type="button" class="btn btn-primary btn-block" id="btnRemoteApiDelete" style="display: none;">DELETE</button>
+            </div>
+            <div class="remote-api-results-wrap">
+              <div class="pagination-bar-wrap" id="remoteApiPaginationTop"></div>
+              <table class="monitoring-table" id="remoteApiResultsTable">
+                <thead id="remoteApiResultsHead"></thead>
+                <tbody id="remoteApiResultsBody"></tbody>
+              </table>
+              <div class="pagination-bar-wrap" id="remoteApiPaginationBottom"></div>
+            </div>
+            <div class="remote-api-actions">
+              <button type="button" class="btn btn-secondary btn-block" id="btnRemoteApiCopyToCsv">Copy to Routers</button>
+              <button type="button" class="btn btn-secondary btn-block" id="btnRemoteApiSaveToCsv">Save to CSV</button>
+              <button type="button" class="btn btn-secondary btn-block" id="btnRemoteApiDownload">Download CSV</button>
+            </div>
+          </div>
+
+          <div class="monitoring-subpane" id="monitoringPaneBackup">
+            <p class="backup-description">Save router configurations to the configs folder. Use Deployment &gt; Configuration to restore configurations to routers.</p>
+            <div class="backup-controls-row">
+              <button type="button" class="btn btn-primary" id="btnBackupConfig">Backup</button>
+            </div>
+            <div class="backup-results-wrap">
+              <table class="monitoring-table" id="backupResultsTable">
+                <thead>
+                  <tr>
+                    <th>IP</th>
+                    <th>Hostname</th>
+                    <th>Success</th>
+                  </tr>
+                </thead>
+                <tbody id="backupResultsBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div class="drawer-pane" id="drawerPaneLogs">
+          <h3>Logs and CSV</h3>
+          <div class="logs-file-select">
+            <label for="logFileSelect">Select log or CSV file</label>
+            <select id="logFileSelect" size="6"></select>
+          </div>
+          <div class="logs-viewer-wrap">
+            <pre id="logContentViewer"></pre>
+          </div>
+          <div class="logs-actions">
+            <button type="button" class="btn btn-secondary" id="btnLogDownload" disabled>Download</button>
+            <button type="button" class="btn btn-secondary" id="btnLogRename" disabled>Rename</button>
+            <button type="button" class="btn btn-danger" id="btnLogDelete" disabled>Delete</button>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <div class="status-bar" id="deployStatus" aria-live="polite"></div>
+
+  <div class="modal" id="discoverRoutersModal">
+    <div class="modal-content">
+      <h3>Discover Routers</h3>
+      <p class="modal-hint">Enter IP subnet (e.g. 192.168.1.0/24) or range (e.g. 192.168.1.1-10)</p>
+      <label for="discoverIpRange">IP Subnet or Range</label>
+      <input type="text" id="discoverIpRange" placeholder="192.168.1.0/24 or 192.168.1.1-10">
+      <label for="discoverUsername">Username</label>
+      <input type="text" id="discoverUsername" value="admin" placeholder="admin">
+      <label for="discoverPassword">Password</label>
+      <input type="password" id="discoverPassword" placeholder="Password">
+      <label for="discoverPort">Port</label>
+      <input type="number" id="discoverPort" value="8080" min="1" max="65535" placeholder="8080">
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" id="btnDiscoverCancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="btnDiscoverSubmit">Discover</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal" id="saveAsModal">
+    <div class="modal-content">
+      <h3>Save As</h3>
+      <input type="text" id="saveAsFilename" placeholder="routers.json">
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" id="btnSaveAsCancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="btnSaveAsConfirm">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal" id="openModal">
+    <div class="modal-content">
+      <h3>Open</h3>
+      <label>Select file from routers folder</label>
+      <select id="openFileList" size="8"></select>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" id="btnOpenCancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="btnOpenConfirm">Open</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal" id="confirmDeleteModal">
+    <div class="modal-content">
+      <h3 id="confirmDeleteTitle">Delete?</h3>
+      <p class="confirm-message" id="confirmDeleteMessage"></p>
+      <p class="confirm-hint" id="confirmDeleteHint">This cannot be undone.</p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" id="btnConfirmDeleteCancel">Cancel</button>
+        <button type="button" class="btn btn-danger" id="btnConfirmDeleteOk">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal" id="settingsModal">
+    <div class="modal-content">
+      <h3>Settings</h3>
+      <label for="settingsTimeout">Connection Timeout (seconds)</label>
+      <input type="number" id="settingsTimeout" value="2" min="1" max="60" placeholder="2">
+      <label for="settingsRetries">Connection Retries</label>
+      <input type="number" id="settingsRetries" value="1" min="0" max="10" placeholder="1">
+      <p class="modal-hint">Used for Discover Routers and Get Router Info.</p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" id="btnSettingsCancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="btnSettingsSave">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal" id="helpModal">
+    <div class="modal-content modal-help">
+      <div class="modal-help-header">
+        <h3>Help</h3>
+        <button type="button" class="btn-help-close" id="helpClose" aria-label="Close">×</button>
+      </div>
+      <div class="modal-help-body" id="helpContent"></div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked@4.3.0/lib/marked.umd.js"></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
