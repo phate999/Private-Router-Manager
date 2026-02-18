@@ -1,8 +1,10 @@
 # Private Router Manager
 
-**Manage Ericsson routers across your network from one place.**
+**Manage Ericsson routers across your private network from one place.**
 
 Private Router Manager is a web-based tool for administrating routers in private networks. Load a JSON or CSV router file and perform bulk operations—deploying licenses, firmware, or configurations, fetching router details, monitoring connectivity, or calling REST APIs—across hundreds of devices in parallel. Built for teams that need to maintain and provision large fleets of routers without relying on cloud management.
+
+<img width="1641" height="854" alt="image" src="https://github.com/user-attachments/assets/9d8210f6-38c8-4a1c-a66c-5d89ade8d7a0" />
 
 ## Highlights
 
