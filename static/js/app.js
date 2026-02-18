@@ -169,11 +169,17 @@
   }
 
   function updateRouterFileLockUI() {
+    // When no router data, file must be unlocked and lock button disabled
+    if (!state.routers.length) {
+      state.routerFileLocked = false;
+    }
     const locked = state.routerFileLocked;
+    const hasRouters = state.routers.length > 0;
     if (btnRouterFileLock) {
+      btnRouterFileLock.disabled = !hasRouters;
       btnRouterFileLock.classList.toggle('btn-lock-unlocked', !locked);
       btnRouterFileLock.classList.toggle('btn-lock-locked', locked);
-      btnRouterFileLock.title = locked ? 'LOCKED - click to unlock routers' : 'UNLOCKED - click to lock routers';
+      btnRouterFileLock.title = !hasRouters ? 'Load routers to lock' : (locked ? 'LOCKED - click to unlock routers' : 'UNLOCKED - click to lock routers');
       btnRouterFileLock.innerHTML = '';
       const icon = document.createElement('span');
       icon.className = 'lock-icon';
@@ -335,6 +341,13 @@
   }
 
   function renderTable() {
+    // When no router data, file must be unlocked and lock button disabled
+    if (!state.routers.length) {
+      state.routerFileLocked = false;
+      if (btnRouterFileLock) btnRouterFileLock.disabled = true;
+    } else if (btnRouterFileLock) {
+      btnRouterFileLock.disabled = false;
+    }
     const fields = getVisibleFields();
     const validSortFields = [...fields, 'state'];
     if (state.routersSort.primary === null || !validSortFields.includes(state.routersSort.primary)) {
