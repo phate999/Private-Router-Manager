@@ -42,6 +42,10 @@
     routerFileLocked: false,
     connectionTimeout: 2,
     connectionRetries: 1,
+    maxWorkers: 64,
+    maxWorkersFormula: 'sqrt',
+    maxWorkersPerCpu: 4,
+    useAsyncClient: false,
     deployType: 'licenses',
     lastFile: '',
     routersSort: { primary: 'ip_address', primaryDir: 1, secondary: null, secondaryDir: 1 },
@@ -146,6 +150,10 @@
   const helpClose = $('#helpClose');
   const settingsTimeout = $('#settingsTimeout');
   const settingsRetries = $('#settingsRetries');
+  const settingsMaxWorkers = $('#settingsMaxWorkers');
+  const settingsMaxWorkersFormula = $('#settingsMaxWorkersFormula');
+  const settingsMaxWorkersPerCpu = $('#settingsMaxWorkersPerCpu');
+  const settingsUseAsyncClient = $('#settingsUseAsyncClient');
   const btnSettingsCancel = $('#btnSettingsCancel');
   const btnSettingsSave = $('#btnSettingsSave');
 
@@ -1226,6 +1234,44 @@
       .catch(e => showDeployStatus('Discover failed: ' + e.message, true));
   });
 
+  function pollRoutersWithStream(routers, onProgress, onComplete) {
+    const useStream = routers.length > 50;
+    const body = JSON.stringify({ routers: routers, stream: useStream });
+    return fetch('/api/get-router-info', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: body,
+    }).then(response => {
+      const ct = response.headers.get('content-type') || '';
+      if (useStream && ct.includes('ndjson')) {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        function read() {
+          return reader.read().then(({ value, done }) => {
+            if (value) buf += decoder.decode(value, { stream: true });
+            const lines = buf.split('\n');
+            buf = lines.pop() || '';
+            for (const line of lines) {
+              if (!line.trim()) continue;
+              try {
+                const ev = JSON.parse(line);
+                if (ev.event === 'router' && onProgress) onProgress(ev.ip, ev.router);
+                if (ev.event === 'complete' && onComplete) onComplete(ev.routers);
+              } catch (_) {}
+            }
+            if (!done) return read();
+          });
+        }
+        return read();
+      }
+      return response.json().then(body => {
+        if (body.error) throw new Error(body.error);
+        if (onComplete && body.routers) onComplete(body.routers);
+      });
+    });
+  }
+
   function runPollRouters() {
     if (!state.routers.length) {
       showDeployStatus?.('Load routers file first.', true);
@@ -1233,29 +1279,25 @@
     }
     const routers = state.routers;
     showDeployStatus?.('Polling routers...', false);
-    fetch('/api/get-router-info', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ routers }),
-    })
-      .then(r => r.json())
-      .then(body => {
-        if (body.error) {
-          showDeployStatus?.(body.error, true);
-        } else {
-          if (body.routers) state.routers = body.routers;
-          const savedScroll = routersTableWrap ? { left: routersTableWrap.scrollLeft, top: routersTableWrap.scrollTop } : null;
-          renderTable();
-          if (savedScroll && routersTableWrap) {
-            requestAnimationFrame(() => {
-              routersTableWrap.scrollLeft = savedScroll.left;
-              routersTableWrap.scrollTop = savedScroll.top;
-            });
-          }
-          showDeployStatus?.('Poll complete.', false);
+    pollRoutersWithStream(routers,
+      (ip, router) => {
+        const idx = state.routers.findIndex(r => (r.ip_address || '').split(':')[0] === ip);
+        if (idx >= 0) state.routers[idx] = router;
+        renderTable();
+      },
+      (routersResult) => {
+        if (routersResult) state.routers = routersResult;
+        const savedScroll = routersTableWrap ? { left: routersTableWrap.scrollLeft, top: routersTableWrap.scrollTop } : null;
+        renderTable();
+        if (savedScroll && routersTableWrap) {
+          requestAnimationFrame(() => {
+            routersTableWrap.scrollLeft = savedScroll.left;
+            routersTableWrap.scrollTop = savedScroll.top;
+          });
         }
-      })
-      .catch(e => showDeployStatus?.('Poll failed: ' + e.message, true));
+        showDeployStatus?.('Poll complete.', false);
+      }
+    ).catch(e => showDeployStatus?.('Poll failed: ' + e.message, true));
   }
 
   let pollAutoTimer = null;
@@ -1272,29 +1314,25 @@
       const doPoll = () => {
         const routers = selected.map(i => state.routers[i]);
         showDeployStatus('Polling routers...', false);
-        fetch('/api/get-router-info', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ routers }),
-        })
-          .then(r => r.json())
-          .then(body => {
-            if (body.error) {
-              showDeployStatus(body.error, true);
-            } else {
-              if (body.routers) state.routers = body.routers;
-              const savedScroll = routersTableWrap ? { left: routersTableWrap.scrollLeft, top: routersTableWrap.scrollTop } : null;
-              renderTable();
-              if (savedScroll && routersTableWrap) {
-                requestAnimationFrame(() => {
-                  routersTableWrap.scrollLeft = savedScroll.left;
-                  routersTableWrap.scrollTop = savedScroll.top;
-                });
-              }
-              showDeployStatus('Poll complete.', false);
+        pollRoutersWithStream(routers,
+          (ip, router) => {
+            const idx = state.routers.findIndex(r => (r.ip_address || '').split(':')[0] === ip);
+            if (idx >= 0) state.routers[idx] = router;
+            renderTable();
+          },
+          (routersResult) => {
+            if (routersResult) state.routers = routersResult;
+            const savedScroll = routersTableWrap ? { left: routersTableWrap.scrollLeft, top: routersTableWrap.scrollTop } : null;
+            renderTable();
+            if (savedScroll && routersTableWrap) {
+              requestAnimationFrame(() => {
+                routersTableWrap.scrollLeft = savedScroll.left;
+                routersTableWrap.scrollTop = savedScroll.top;
+              });
             }
-          })
-          .catch(e => showDeployStatus('Poll failed: ' + e.message, true));
+            showDeployStatus('Poll complete.', false);
+          }
+        ).catch(e => showDeployStatus('Poll failed: ' + e.message, true));
       };
       if (allSelected) {
         showConfirmDelete('Poll all routers?', `Poll router info for all ${selected.length} router(s)?`, doPoll, '', 'Poll');
@@ -1326,9 +1364,26 @@
 
   if (settingsBtn) {
     settingsBtn.addEventListener('click', () => {
-      settingsTimeout.value = state.connectionTimeout;
-      settingsRetries.value = state.connectionRetries;
-      settingsModal?.classList.add('visible');
+      fetch('/api/config/app')
+        .then(r => r.json())
+        .then(cfg => {
+          settingsTimeout.value = cfg.connection_timeout ?? state.connectionTimeout;
+          settingsRetries.value = cfg.connection_retries ?? state.connectionRetries;
+          settingsMaxWorkers.value = cfg.max_workers ?? state.maxWorkers;
+          settingsMaxWorkersFormula.value = cfg.max_workers_formula ?? state.maxWorkersFormula;
+          settingsMaxWorkersPerCpu.value = cfg.max_workers_per_cpu ?? state.maxWorkersPerCpu;
+          settingsUseAsyncClient.checked = cfg.use_async_client ?? state.useAsyncClient;
+          settingsModal?.classList.add('visible');
+        })
+        .catch(() => {
+          settingsTimeout.value = state.connectionTimeout;
+          settingsRetries.value = state.connectionRetries;
+          settingsMaxWorkers.value = state.maxWorkers;
+          settingsMaxWorkersFormula.value = state.maxWorkersFormula;
+          settingsMaxWorkersPerCpu.value = state.maxWorkersPerCpu;
+          settingsUseAsyncClient.checked = state.useAsyncClient;
+          settingsModal?.classList.add('visible');
+        });
     });
   }
   btnSettingsCancel?.addEventListener('click', () => settingsModal?.classList.remove('visible'));
@@ -1336,16 +1391,31 @@
     btnSettingsSave.addEventListener('click', () => {
       const timeout = parseInt(settingsTimeout?.value, 10) || 2;
       const retries = parseInt(settingsRetries?.value, 10) || 1;
+      const maxWorkers = parseInt(settingsMaxWorkers?.value, 10) || 64;
+      const maxWorkersFormula = settingsMaxWorkersFormula?.value || 'sqrt';
+      const maxWorkersPerCpu = parseInt(settingsMaxWorkersPerCpu?.value, 10) || 4;
+      const useAsyncClient = settingsUseAsyncClient?.checked ?? false;
       settingsModal?.classList.remove('visible');
       fetch('/api/config/app', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ connection_timeout: timeout, connection_retries: retries }),
+        body: JSON.stringify({
+          connection_timeout: timeout,
+          connection_retries: retries,
+          max_workers: maxWorkers,
+          max_workers_formula: maxWorkersFormula,
+          max_workers_per_cpu: maxWorkersPerCpu,
+          use_async_client: useAsyncClient,
+        }),
       })
         .then(r => r.json())
         .then(() => {
           state.connectionTimeout = timeout;
           state.connectionRetries = retries;
+          state.maxWorkers = maxWorkers;
+          state.maxWorkersFormula = maxWorkersFormula;
+          state.maxWorkersPerCpu = maxWorkersPerCpu;
+          state.useAsyncClient = useAsyncClient;
           showDeployStatus('Settings saved.', false);
         })
         .catch(() => showDeployStatus('Failed to save settings.', true));
@@ -1483,6 +1553,10 @@
       .then(cfg => {
         if (cfg.connection_timeout != null) state.connectionTimeout = cfg.connection_timeout;
         if (cfg.connection_retries != null) state.connectionRetries = cfg.connection_retries;
+        if (cfg.max_workers != null) state.maxWorkers = cfg.max_workers;
+        if (cfg.max_workers_formula != null) state.maxWorkersFormula = cfg.max_workers_formula;
+        if (cfg.max_workers_per_cpu != null) state.maxWorkersPerCpu = cfg.max_workers_per_cpu;
+        if (cfg.use_async_client != null) state.useAsyncClient = cfg.use_async_client;
         if (cfg.last_file) {
           state.lastFile = cfg.last_file;
           fetch('/api/routers/open?filename=' + encodeURIComponent(cfg.last_file))

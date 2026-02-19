@@ -609,7 +609,37 @@ body.light-mode .routers-table tbody tr:hover td {
 .modal-hint {
   font-size: 0.9rem;
   color: var(--text-muted);
+}
+
+.settings-divider {
+  margin: 1.25rem 0 0.75rem;
+  border: none;
+  border-top: 1px solid var(--border);
+}
+
+.settings-section-title {
+  font-size: 0.95rem;
   margin: 0 0 0.75rem;
+  color: var(--text-muted);
+}
+
+.settings-checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  cursor: pointer;
+}
+
+.settings-checkbox-label input {
+  width: auto;
+  min-width: auto;
+  margin: 0 0 0.75rem;
+}
+
+.modal-content select.settings-select {
+  min-height: auto;
+  height: 2.25rem;
 }
 
 .modal-content label {

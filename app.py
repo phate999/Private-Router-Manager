@@ -7,6 +7,8 @@ import csv
 import io
 import ipaddress
 import json
+import math
+import multiprocessing
 import os
 import platform
 import re
@@ -17,7 +19,9 @@ from datetime import datetime
 from pathlib import Path
 
 import requests
-from flask import Flask, request, jsonify, render_template, send_file
+from flask import Flask, Response, request, jsonify, render_template, send_file, stream_with_context
+
+from metrics import connection_finished, connection_started, get_metrics, request_completed
 
 NCOS_DEVICE_URL = "https://www.cradlepointecm.com/api/v2/firmwares/?limit=500&version="
 NCOS_FIRMWARE_BASE = "https://d251cfg5d9gyuq.cloudfront.net"
@@ -334,7 +338,15 @@ def readme():
 
 def _load_app_config():
     """Load app config with defaults. Returns dict."""
-    defaults = {"last_file": "", "connection_timeout": 2, "connection_retries": 1}
+    defaults = {
+        "last_file": "",
+        "connection_timeout": 2,
+        "connection_retries": 1,
+        "max_workers": 64,
+        "max_workers_formula": "sqrt",
+        "max_workers_per_cpu": 4,
+        "use_async_client": False,
+    }
     if not APP_CONFIG_FILE.exists():
         return defaults
     try:
@@ -345,20 +357,99 @@ def _load_app_config():
                 cfg[k] = defaults[k]
         cfg["connection_timeout"] = max(1, min(60, int(cfg.get("connection_timeout", 2))))
         cfg["connection_retries"] = max(0, min(10, int(cfg.get("connection_retries", 1))))
+        cfg["max_workers"] = max(1, min(256, int(cfg.get("max_workers", 64))))
+        if cfg.get("max_workers_formula") not in ("cpu", "sqrt", "linear"):
+            cfg["max_workers_formula"] = "sqrt"
+        cfg["max_workers_per_cpu"] = max(1, min(16, int(cfg.get("max_workers_per_cpu", 4))))
+        cfg["use_async_client"] = bool(cfg.get("use_async_client", False))
         return cfg
     except (json.JSONDecodeError, IOError):
         return defaults
 
 
+def _parse_pagination_args(data_source=None, default_per_page=2000):
+    """Parse page and per_page. data_source: request.args (GET) or dict (POST). Returns (page, per_page) or (None, None) for no pagination."""
+    src = data_source or (request.args if request.method == "GET" else (request.get_json(silent=True) or {}))
+    page_s = src.get("page") if isinstance(src, dict) else src.get("page")
+    per_s = src.get("per_page") if isinstance(src, dict) else src.get("per_page")
+    if page_s is None and per_s is None:
+        return None, None
+    try:
+        page = max(0, int(page_s)) if page_s is not None else 0
+        per = max(1, min(5000, int(per_s))) if per_s is not None else default_per_page
+        return page, per
+    except (TypeError, ValueError):
+        return 0, default_per_page
+
+
+def _paginate_routers_response(items, page, per_page):
+    """Return paginated dict {routers, total?, page?, per_page?} or {routers} if page is None."""
+    if page is None:
+        return {"routers": items}  # backward compatible
+    total = len(items)
+    start = page * per_page
+    end = start + per_page
+    return {
+        "routers": items[start:end],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+    }
+
+
+def _paginate_results_response(results, page, per_page, extra=None):
+    """Return paginated dict with results key. extra merged into response."""
+    if page is None:
+        out = {"results": results}
+    else:
+        total = len(results)
+        start = page * per_page
+        end = start + per_page
+        out = {
+            "results": results[start:end],
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+        }
+    if extra:
+        out.update(extra)
+    return out
+
+
+def _get_max_workers(router_count: int, operation: str = "default") -> int:
+    """Compute max_workers from config, router count, and CPU count."""
+    cfg = _load_app_config()
+    cap = int(cfg.get("max_workers", 64))
+    formula = cfg.get("max_workers_formula", "sqrt")
+    per_cpu = int(cfg.get("max_workers_per_cpu", 4))
+    cpu_count = multiprocessing.cpu_count() or 4
+    n = max(1, router_count)
+
+    if formula == "cpu":
+        computed = min(cpu_count * per_cpu, cap)
+    elif formula == "sqrt":
+        computed = min(max(4, int(math.sqrt(n)) * 2), cap)
+    elif formula == "linear":
+        computed = min(max(4, n // 10), cap)
+    else:
+        computed = min(max(4, int(math.sqrt(n)) * 2), cap)
+
+    return max(4, min(computed, cap))
+
+
 @app.route("/api/config/app", methods=["GET", "POST"])
 def app_config():
-    """Get or save app config (last_file, connection_timeout, connection_retries)."""
+    """Get or save app config (last_file, connection_timeout, connection_retries, max_workers, etc.)."""
     if request.method == "GET":
         cfg = _load_app_config()
         return jsonify({
             "last_file": cfg.get("last_file", ""),
             "connection_timeout": cfg.get("connection_timeout", 2),
             "connection_retries": cfg.get("connection_retries", 1),
+            "max_workers": cfg.get("max_workers", 64),
+            "max_workers_formula": cfg.get("max_workers_formula", "sqrt"),
+            "max_workers_per_cpu": cfg.get("max_workers_per_cpu", 4),
+            "use_async_client": cfg.get("use_async_client", False),
         })
     data = request.get_json() or {}
     cfg = _load_app_config()
@@ -368,6 +459,15 @@ def app_config():
         cfg["connection_timeout"] = max(1, min(60, int(data.get("connection_timeout", 2))))
     if "connection_retries" in data:
         cfg["connection_retries"] = max(0, min(10, int(data.get("connection_retries", 1))))
+    if "max_workers" in data:
+        cfg["max_workers"] = max(1, min(256, int(data.get("max_workers", 64))))
+    if "max_workers_formula" in data:
+        v = data.get("max_workers_formula", "sqrt")
+        cfg["max_workers_formula"] = v if v in ("cpu", "sqrt", "linear") else "sqrt"
+    if "max_workers_per_cpu" in data:
+        cfg["max_workers_per_cpu"] = max(1, min(16, int(data.get("max_workers_per_cpu", 4))))
+    if "use_async_client" in data:
+        cfg["use_async_client"] = bool(data.get("use_async_client", False))
     with open(APP_CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
     return jsonify({"ok": True})
@@ -496,7 +596,8 @@ def routers_open():
             return jsonify({"error": "Invalid JSON"}), 400
     routers_data.clear()
     routers_data.extend(routers)
-    return jsonify({"routers": list(routers_data)})
+    page, per_page = _parse_pagination_args(request.args)
+    return jsonify(_paginate_routers_response(list(routers_data), page, per_page))
 
 
 @app.route("/api/routers/upload", methods=["POST"])
@@ -523,7 +624,9 @@ def routers_upload():
         return jsonify({"error": "No valid router data"}), 400
     routers_data.clear()
     routers_data.extend(routers)
-    return jsonify({"routers": list(routers_data)})
+    data_src = request.form if request.form else (request.get_json(silent=True) or {})
+    page, per_page = _parse_pagination_args(data_src)
+    return jsonify(_paginate_routers_response(list(routers_data), page, per_page))
 
 
 @app.route("/api/routers/download")
@@ -809,6 +912,40 @@ def _ping_target(ip, count=5):
     return result
 
 
+@app.route("/api/monitoring/metrics")
+def api_monitoring_metrics():
+    """Return connection counts, timeouts, errors, and memory metrics."""
+    return jsonify(get_metrics(routers_count=len(routers_data)))
+
+
+@app.route("/metrics")
+def prometheus_metrics():
+    """Prometheus scrape endpoint. Requires prometheus_client: pip install prometheus_client."""
+    try:
+        from prometheus_client import CONTENT_TYPE_LATEST, Gauge, generate_latest, Registry
+
+        m = get_metrics(routers_count=len(routers_data))
+        reg = Registry()
+        conn_active = Gauge("router_manager_connections_active", "Active router API connections", registry=reg)
+        req_total = Gauge("router_manager_requests_total", "Total router API requests (cumulative)", registry=reg)
+        timeout_total = Gauge("router_manager_timeouts_total", "Total timeout errors (cumulative)", registry=reg)
+        errors_total = Gauge("router_manager_errors_total", "Total request errors (cumulative)", registry=reg)
+        mem_rss = Gauge("router_manager_memory_rss_mb", "Process RSS memory in MB", registry=reg)
+        routers_count = Gauge("router_manager_routers_count", "Number of loaded routers", registry=reg)
+
+        conn_active.set(m.get("connections_active", 0))
+        req_total.set(m.get("requests_total", 0))
+        timeout_total.set(m.get("timeouts_total", 0))
+        errors_total.set(m.get("errors_total", 0))
+        if m.get("memory_rss_mb") is not None:
+            mem_rss.set(m["memory_rss_mb"])
+        routers_count.set(m.get("routers_count", 0))
+
+        return generate_latest(reg), 200, {"Content-Type": CONTENT_TYPE_LATEST}
+    except ImportError:
+        return "prometheus_client not installed. Run: pip install prometheus_client", 501, {"Content-Type": "text/plain"}
+
+
 @app.route("/api/monitoring/ping", methods=["POST"])
 def api_ping():
     """Ping all targets in parallel. Returns list of results. Updates state in routers_data."""
@@ -817,7 +954,7 @@ def api_ping():
     if not targets:
         return jsonify({"error": "No targets provided"}), 400
     count = int(data.get("count", 5))
-    max_workers = min(32, max(4, len(targets)))
+    max_workers = _get_max_workers(len(targets), "ping")
     results = []
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = {ex.submit(_ping_target, t, count): t for t in targets}
@@ -858,7 +995,8 @@ def api_ping():
                 json.dump({"routers": [_normalize_router(r) for r in routers_data]}, f, indent=2)
         except IOError:
             pass
-    return jsonify({"results": ordered})
+    page, per_page = _parse_pagination_args(data)
+    return jsonify(_paginate_results_response(ordered, page, per_page))
 
 
 @app.route("/api/monitoring/ping/offline-log", methods=["POST"])
@@ -1028,6 +1166,7 @@ def _call_router_api(ip, port, username, password, method, path, payload=None):
     base = f"http://{ip}:{port}" if ":" not in str(ip) else f"http://{ip}"
     url = f"{base}/api/{path.lstrip('/')}"
     auth = (username, password)
+    connection_started()
     try:
         if method == "GET":
             r = requests.get(url, auth=auth, verify=False, timeout=15)
@@ -1044,24 +1183,41 @@ def _call_router_api(ip, port, username, password, method, path, payload=None):
         elif method == "DELETE":
             r = requests.delete(url, auth=auth, verify=False, timeout=15)
         else:
+            connection_finished()
+            request_completed(success=False)
             return False, "Invalid method"
         if r.status_code >= 300:
+            connection_finished()
+            request_completed(success=False)
             return False, f"{r.status_code}: {r.text[:200] if r.text else 'No response'}"
         try:
             data = r.json()
         except Exception:
+            connection_finished()
+            request_completed(success=True)
             return True, r.text or "(empty)"
         # Check for error in response body (router may return 200 with error payload)
         if isinstance(data, dict):
             if data.get("success") is False:
+                connection_finished()
+                request_completed(success=False)
                 return False, data.get("error") or data.get("message") or str(data)[:200]
             if "error" in data and data["error"]:
+                connection_finished()
+                request_completed(success=False)
                 return False, str(data["error"])[:200]
         # For GET: extract "data" key for cleaner results
         if method == "GET" and isinstance(data, dict) and "data" in data:
+            connection_finished()
+            request_completed(success=True)
             return True, data["data"]
+        connection_finished()
+        request_completed(success=True)
         return True, data
     except Exception as e:
+        connection_finished()
+        is_timeout = isinstance(e, (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout))
+        request_completed(success=False, timed_out=is_timeout)
         return False, _format_connection_error(e)
 
 
@@ -1069,6 +1225,7 @@ def _call_router_api(ip, port, username, password, method, path, payload=None):
 def api_remote_api():
     """Call router API endpoints. Returns results per router."""
     data = request.get_json() or {}
+    cfg = _load_app_config()
     method = (data.get("method") or "GET").upper()
     if method not in ("GET", "PUT", "POST", "DELETE"):
         return jsonify({"error": "Invalid method"}), 400
@@ -1129,54 +1286,107 @@ def api_remote_api():
     if not targets:
         return jsonify({"error": "No valid targets with credentials"}), 400
 
-    def fetch_one(idx, t):
-        if method == "GET":
-            row_data = {"ip": t["ip"], "hostname": t["hostname"] or "-"}
-            for p in paths:
-                has_wildcard = "*" in p
-                api_path = p  # default: use path as-is
-                if has_wildcard:
-                    path_segments = p.split("/")
-                    star_idx = next((i for i, s in enumerate(path_segments) if "*" in s), None)
-                    if star_idx is not None and star_idx > 0:
-                        base_api_path = "/".join(path_segments[:star_idx])
-                        remainder = path_segments[star_idx:]  # ["*", "signal"] or ["mdm*", "diagnostics"]
-                        api_path = base_api_path
-                    else:
-                        if star_idx == 0:
-                            row_data[p] = "Failed: path must have segment before *"
-                            continue
-                        has_wildcard = False
+    use_async = cfg.get("use_async_client", False)
+    try:
+        from router_client import call_routers_api_concurrent, run_async
+    except ImportError:
+        use_async = False
 
-                success, data_or_err = _call_router_api(t["ip"], t["port"], t["username"], t["password"], "GET", api_path)
-                if success and isinstance(data_or_err, (dict, list)) and has_wildcard:
-                    expanded = _expand_path_wildcard(data_or_err, api_path, remainder)
-                    for full_path, val in expanded:
-                        row_data[full_path] = val if val is None or isinstance(val, (str, int, float, bool)) else json.dumps(val)
-                elif success:
-                    if isinstance(data_or_err, (dict, list)):
-                        row_data[p] = json.dumps(data_or_err) if data_or_err else ""
-                    else:
-                        row_data[p] = str(data_or_err) if data_or_err is not None else ""
+    simple_async = use_async and (
+        method in ("PUT", "POST", "DELETE") or
+        (method == "GET" and len(paths) == 1 and "*" not in paths[0])
+    )
+
+    if simple_async:
+        api_targets = [(t["ip"], t["port"], t["username"], t["password"]) for t in targets]
+        max_concurrent = _get_max_workers(len(targets), "remote_api")
+        path_to_call = paths[0] if method == "GET" else paths[0]
+        payload_to_use = None
+        if method in ("PUT", "POST"):
+            try:
+                payload_str = (data.get("payload") or "").strip()
+                payload_to_use = json.loads(payload_str) if payload_str else None
+            except json.JSONDecodeError:
+                pass
+        try:
+            import metrics as metrics_mod
+            ordered_results = run_async(call_routers_api_concurrent(
+                api_targets, method, path_to_call, payload_to_use,
+                max_concurrent=max_concurrent, metrics=metrics_mod
+            ))
+        except Exception:
+            simple_async = False
+
+    if simple_async:
+        results_by_idx = {}
+        for i, t in enumerate(targets):
+            ip, hostname, success, data_or_err = ordered_results[i]
+            if method == "GET":
+                row_data = {"ip": t["ip"], "hostname": t["hostname"] or "-"}
+                if isinstance(data_or_err, (dict, list)):
+                    row_data[paths[0]] = json.dumps(data_or_err) if data_or_err else ""
                 else:
-                    row_data[p] = f"Failed: {data_or_err}"
-            return idx, row_data
-        else:
-            success, data_or_err = _call_router_api(t["ip"], t["port"], t["username"], t["password"], method, paths[0], payload)
-            return idx, {
-                "ip": t["ip"],
-                "hostname": t["hostname"] or "-",
-                "result": "Success" if success else f"Failed: {data_or_err}"
-            }
+                    row_data[paths[0]] = str(data_or_err) if data_or_err is not None else ""
+                if not success:
+                    row_data[paths[0]] = f"Failed: {data_or_err}"
+                results_by_idx[i] = row_data
+            else:
+                results_by_idx[i] = {
+                    "ip": t["ip"],
+                    "hostname": t["hostname"] or "-",
+                    "result": "Success" if success else f"Failed: {data_or_err}"
+                }
+        results = [results_by_idx[i] for i in range(len(targets))]
+    else:
 
-    max_workers = min(16, max(4, len(targets)))
-    results_by_idx = {}
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(fetch_one, i, t): i for i, t in enumerate(targets)}
-        for future in as_completed(futures):
-            idx, row_data = future.result()
-            results_by_idx[idx] = row_data
-    results = [results_by_idx[i] for i in range(len(targets))]
+        def fetch_one(idx, t):
+            if method == "GET":
+                row_data = {"ip": t["ip"], "hostname": t["hostname"] or "-"}
+                for p in paths:
+                    has_wildcard = "*" in p
+                    api_path = p  # default: use path as-is
+                    if has_wildcard:
+                        path_segments = p.split("/")
+                        star_idx = next((i for i, s in enumerate(path_segments) if "*" in s), None)
+                        if star_idx is not None and star_idx > 0:
+                            base_api_path = "/".join(path_segments[:star_idx])
+                            remainder = path_segments[star_idx:]  # ["*", "signal"] or ["mdm*", "diagnostics"]
+                            api_path = base_api_path
+                        else:
+                            if star_idx == 0:
+                                row_data[p] = "Failed: path must have segment before *"
+                                continue
+                            has_wildcard = False
+
+                    success, data_or_err = _call_router_api(t["ip"], t["port"], t["username"], t["password"], "GET", api_path)
+                    if success and isinstance(data_or_err, (dict, list)) and has_wildcard:
+                        expanded = _expand_path_wildcard(data_or_err, api_path, remainder)
+                        for full_path, val in expanded:
+                            row_data[full_path] = val if val is None or isinstance(val, (str, int, float, bool)) else json.dumps(val)
+                    elif success:
+                        if isinstance(data_or_err, (dict, list)):
+                            row_data[p] = json.dumps(data_or_err) if data_or_err else ""
+                        else:
+                            row_data[p] = str(data_or_err) if data_or_err is not None else ""
+                    else:
+                        row_data[p] = f"Failed: {data_or_err}"
+                return idx, row_data
+            else:
+                success, data_or_err = _call_router_api(t["ip"], t["port"], t["username"], t["password"], method, paths[0], payload)
+                return idx, {
+                    "ip": t["ip"],
+                    "hostname": t["hostname"] or "-",
+                    "result": "Success" if success else f"Failed: {data_or_err}"
+                }
+
+        max_workers = _get_max_workers(len(targets), "remote_api")
+        results_by_idx = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(fetch_one, i, t): i for i, t in enumerate(targets)}
+            for future in as_completed(futures):
+                idx, row_data = future.result()
+                results_by_idx[idx] = row_data
+        results = [results_by_idx[i] for i in range(len(targets))]
 
     path_cols = paths if method == "GET" else []
     non_wildcard_paths = [p for p in path_cols if "*" not in p]
@@ -1188,12 +1398,10 @@ def api_remote_api():
     else:
         columns = base_cols if method == "GET" else ["ip", "hostname", "result"]
 
-    return jsonify({
-        "method": method,
-        "paths": paths,
-        "results": results,
-        "columns": columns
-    })
+    data_src = request.get_json() or {}
+    page, per_page = _parse_pagination_args(data_src)
+    extra = {"method": method, "paths": paths, "columns": columns}
+    return jsonify(_paginate_results_response(results, page, per_page, extra=extra))
 
 
 @app.route("/api/monitoring/remote-api/save", methods=["POST"])
@@ -1280,7 +1488,7 @@ def api_save_config():
         except Exception as e:
             return idx, ip, hostname or "-", None, str(e)
 
-    max_workers = min(16, max(4, len(indices)))
+    max_workers = _get_max_workers(len(indices), "save_config")
     results = []
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = {ex.submit(save_one, i): i for i in indices}
@@ -1535,20 +1743,31 @@ def discover_routers():
     if len(ips) > 512:
         return jsonify({"error": "Too many IPs (max 512). Use a smaller range."}), 400
 
-    def fetch_one(ip):
-        info = _fetch_router_info(ip, port, username, password, timeout=timeout, retries=retries)
-        return ip, info
+    use_async = cfg.get("use_async_client", False)
+    try:
+        from router_client import fetch_routers_info_concurrent, run_async
+    except ImportError:
+        use_async = False
 
-    max_workers = min(16, max(4, len(ips)))
-    discovered = []
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(fetch_one, ip): ip for ip in ips}
-        for future in as_completed(futures):
-            try:
-                ip, info = future.result()
+    if use_async:
+        ip_cred_list = [(ip, port, username, password) for ip in ips]
+        max_concurrent = _get_max_workers(len(ips), "discover")
+        try:
+            gathered = run_async(fetch_routers_info_concurrent(ip_cred_list, timeout=timeout, max_concurrent=max_concurrent))
+        except Exception:
+            use_async = False
+
+    if use_async:
+        discovered = []
+        for i, item in enumerate(gathered):
+            ip = ips[i]
+            if isinstance(item, Exception):
+                discovered.append((ip, None, False))
+            else:
+                ip_res, info = item
                 r = _empty_router()
-                r["ip_address"] = ip
-                r["state"] = "Online"  # discovered = successfully connected
+                r["ip_address"] = ip_res
+                r["state"] = "Online"
                 r["created_at"] = datetime.now().isoformat()
                 r["username"] = username
                 r["password"] = password
@@ -1558,10 +1777,36 @@ def discover_routers():
                 r["serial_number"] = info.get("serial_number", "")
                 r["product_name"] = info.get("product_name", "")
                 r["ncos_version"] = info.get("ncos", "")
-                discovered.append((ip, r, any([info.get("hostname"), info.get("mac_address"), info.get("product_name")])))
-            except Exception:
-                ip = futures[future]
-                discovered.append((ip, None, False))
+                discovered.append((ip_res, r, any([info.get("hostname"), info.get("mac_address"), info.get("product_name")])))
+    else:
+
+        def fetch_one(ip):
+            info = _fetch_router_info(ip, port, username, password, timeout=timeout, retries=retries)
+            return ip, info
+
+        max_workers = _get_max_workers(len(ips), "discover")
+        discovered = []
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(fetch_one, ip): ip for ip in ips}
+            for future in as_completed(futures):
+                try:
+                    ip, info = future.result()
+                    r = _empty_router()
+                    r["ip_address"] = ip
+                    r["state"] = "Online"  # discovered = successfully connected
+                    r["created_at"] = datetime.now().isoformat()
+                    r["username"] = username
+                    r["password"] = password
+                    r["port"] = port
+                    r["hostname"] = info.get("hostname", "")
+                    r["mac"] = info.get("mac_address", "")
+                    r["serial_number"] = info.get("serial_number", "")
+                    r["product_name"] = info.get("product_name", "")
+                    r["ncos_version"] = info.get("ncos", "")
+                    discovered.append((ip, r, any([info.get("hostname"), info.get("mac_address"), info.get("product_name")])))
+                except Exception:
+                    ip = futures[future]
+                    discovered.append((ip, None, False))
 
     # Write log
     log_filename = f"discover_routers_{datetime.now().strftime('%Y-%m-%d_%H.%M.%S')}.log"
@@ -1630,7 +1875,12 @@ def discover_routers():
     except (json.JSONDecodeError, IOError):
         pass
 
-    return jsonify({"routers": list(routers_data), "last_file": filename, "log_file": log_filename})
+    data_src = request.get_json() or {}
+    page, per_page = _parse_pagination_args(data_src)
+    resp = _paginate_routers_response(list(routers_data), page, per_page)
+    resp["last_file"] = filename
+    resp["log_file"] = log_filename
+    return jsonify(resp)
 
 
 def _collect_api_path_columns(routers):
@@ -1643,10 +1893,97 @@ def _collect_api_path_columns(routers):
     return list(paths)
 
 
+def _get_router_info_generator(routers, timeout, retries, api_paths, max_workers):
+    """Generator yielding NDJSON lines for streaming get-router-info progress."""
+    def fetch_one(r):
+        ip = str(r.get("ip_address") or "").strip().split(":")[0]
+        if not ip:
+            return None, r, False
+        port = int(r.get("port") or 8080)
+        username = str(r.get("username") or "admin").strip() or "admin"
+        password = str(r.get("password") or "").strip()
+        info = _fetch_router_info(ip, port, username, password, timeout=timeout, retries=retries)
+        r["hostname"] = info.get("hostname", "")
+        r["mac"] = info.get("mac_address", "")
+        r["serial_number"] = info.get("serial_number", "")
+        r["product_name"] = info.get("product_name", "")
+        r["ncos_version"] = info.get("ncos", "")
+        r["state"] = "Online" if any([info.get("hostname"), info.get("mac_address"), info.get("product_name")]) else r.get("state", "")
+        for path in api_paths:
+            success, data_or_err = _call_router_api(ip, port, username, password, "GET", path)
+            if success:
+                r[path] = json.dumps(data_or_err) if isinstance(data_or_err, (dict, list)) else (str(data_or_err) if data_or_err is not None else "")
+            else:
+                r[path] = f"Failed: {data_or_err}"
+        return ip, r, any([info.get("hostname"), info.get("mac_address"), info.get("product_name")])
+
+    results = []
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(fetch_one, dict(r)): r for r in routers}
+        for future in as_completed(futures):
+            ip, updated = None, None
+            try:
+                ip, updated, ok = future.result()
+                if ip:
+                    results.append((ip, updated, ok))
+                else:
+                    orig = futures[future]
+                    ip = str(orig.get("ip_address") or "").strip().split(":")[0]
+                    updated = dict(orig)
+                    results.append((ip, updated, False))
+            except Exception:
+                orig = futures[future]
+                ip = str(orig.get("ip_address") or "").strip().split(":")[0]
+                updated = dict(orig)
+                results.append((ip, updated, False))
+            # Stream each completed router
+            if ip and updated is not None:
+                by_ip = {rip: (r, ok) for rip, r, ok in results if rip}
+                for rd in routers_data:
+                    rd_ip = str(rd.get("ip_address", "")).strip().split(":")[0]
+                    if rd_ip and rd_ip in by_ip:
+                        upd, _ = by_ip[rd_ip]
+                        for k, v in upd.items():
+                            rd[k] = v
+                yield json.dumps({"event": "router", "ip": ip, "router": updated}) + "\n"
+
+    # Merge all results into routers_data
+    by_ip = {ip: (r, ok) for ip, r, ok in results if ip}
+    for rd in routers_data:
+        rd_ip = str(rd.get("ip_address", "")).strip().split(":")[0]
+        if rd_ip and rd_ip in by_ip:
+            upd, _ = by_ip[rd_ip]
+            for k, v in upd.items():
+                rd[k] = v
+
+    # Persist to file
+    if routers_data:
+        filename = "routers.json"
+        if APP_CONFIG_FILE.exists():
+            try:
+                with open(APP_CONFIG_FILE, encoding="utf-8") as f:
+                    c = json.load(f)
+                if c.get("last_file"):
+                    filename = c["last_file"]
+            except (json.JSONDecodeError, IOError):
+                pass
+        if not filename.lower().endswith(".json"):
+            filename += ".json"
+        filepath = ROUTERS_DIR / filename
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump({"routers": [_normalize_router(r) for r in routers_data]}, f, indent=2)
+        except IOError:
+            pass
+
+    yield json.dumps({"event": "complete", "routers": list(routers_data), "total": len(routers_data)}) + "\n"
+
+
 @app.route("/api/get-router-info", methods=["POST"])
 def get_router_info():
     """Fetch hostname, mac, serial, product_name, ncos_version for selected routers. Uses per-router credentials.
-    Also fetches any API path columns that were added via Remote API Copy to Routers."""
+    Also fetches any API path columns that were added via Remote API Copy to Routers.
+    Supports ?stream=1 for NDJSON streaming of progress."""
     data = request.get_json() or {}
     routers = data.get("routers") or []
     if not routers:
@@ -1655,6 +1992,16 @@ def get_router_info():
     timeout = cfg.get("connection_timeout", 2)
     retries = cfg.get("connection_retries", 1)
     api_paths = _collect_api_path_columns(routers)
+    stream_mode = data.get("stream") or request.args.get("stream") == "1"
+
+    if stream_mode:
+        max_workers = _get_max_workers(len(routers), "get_router_info")
+        gen = _get_router_info_generator(routers, timeout, retries, api_paths, max_workers)
+        return Response(
+            stream_with_context(gen),
+            mimetype="application/x-ndjson",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     def fetch_one(r):
         ip = str(r.get("ip_address") or "").strip().split(":")[0]
@@ -1678,7 +2025,7 @@ def get_router_info():
                 r[path] = f"Failed: {data_or_err}"
         return ip, r, any([info.get("hostname"), info.get("mac_address"), info.get("product_name")])
 
-    max_workers = min(16, max(4, len(routers)))
+    max_workers = _get_max_workers(len(routers), "get_router_info")
     results = []
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = {ex.submit(fetch_one, dict(r)): r for r in routers}
@@ -1721,7 +2068,8 @@ def get_router_info():
         except IOError:
             pass
 
-    return jsonify({"routers": list(routers_data)})
+    page, per_page = _parse_pagination_args(data)
+    return jsonify(_paginate_routers_response(list(routers_data), page, per_page))
 
 
 @app.route("/api/deploy", methods=["POST"])
@@ -1783,7 +2131,7 @@ def deploy():
             success = push_sdk_app_via_scp(ip, port, username, password, str(path), result_lines)
             return idx, success, [header_line] + result_lines
 
-        max_workers = min(16, max(4, len(indices)))
+        max_workers = _get_max_workers(len(indices), "deploy")
         results_by_idx = {}
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = {ex.submit(deploy_sdk_one, i, routers_data[i]): i for i in indices}
@@ -1821,7 +2169,7 @@ def deploy():
             push_to_router(ip, port, username, password, str(path), action, result_lines)
             return idx, "\n".join(result_lines) if result_lines else ""
 
-        max_workers = min(16, max(4, len(indices)))
+        max_workers = _get_max_workers(len(indices), "deploy")
         results_by_idx = {}
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = {ex.submit(deploy_one, i, routers_data[i]): i for i in indices}

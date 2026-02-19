@@ -347,6 +347,25 @@
       <label for="settingsRetries">Connection Retries</label>
       <input type="number" id="settingsRetries" value="1" min="0" max="10" placeholder="1">
       <p class="modal-hint">Used for Discover Routers and Get Router Info.</p>
+
+      <hr class="settings-divider">
+      <h4 class="settings-section-title">Scaling (for large router fleets)</h4>
+      <label for="settingsMaxWorkers">Max Workers (concurrent operations cap)</label>
+      <input type="number" id="settingsMaxWorkers" value="64" min="1" max="256" placeholder="64">
+      <label for="settingsMaxWorkersFormula">Worker Formula</label>
+      <select id="settingsMaxWorkersFormula" class="settings-select">
+        <option value="sqrt">sqrt — scale with √router count</option>
+        <option value="cpu">cpu — CPU-bound (workers ≈ CPUs × per-CPU)</option>
+        <option value="linear">linear — scale linearly with router count</option>
+      </select>
+      <label for="settingsMaxWorkersPerCpu">Max Workers Per CPU</label>
+      <input type="number" id="settingsMaxWorkersPerCpu" value="4" min="1" max="16" placeholder="4">
+      <label class="settings-checkbox-label">
+        <input type="checkbox" id="settingsUseAsyncClient">
+        Use async I/O (aiohttp) for bulk router calls
+      </label>
+      <p class="modal-hint">Async I/O can improve throughput when calling many routers. Requires aiohttp.</p>
+
       <div class="modal-actions">
         <button type="button" class="btn btn-secondary" id="btnSettingsCancel">Cancel</button>
         <button type="button" class="btn btn-primary" id="btnSettingsSave">Save</button>
