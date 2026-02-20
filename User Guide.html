@@ -123,7 +123,7 @@
 
 <h3 id="row-selection">2.3 Row Selection</h3>
 
-<p>The first column contains checkboxes for selecting rows:</p>
+<p>The first column contains checkboxes for selecting rows. This column stays fixed on the left when you scroll horizontally, so you can always see and use the checkboxes:</p>
 
 <ul>
   <li><strong>Select All</strong> (header checkbox) — Selects or deselects all routers across all pages. Tooltip explains it selects routers even if not currently visible.</li>
@@ -134,7 +134,7 @@
 
 <h3 id="poll-routers">2.4 Poll Routers</h3>
 
-<p>Fetches Hostname, MAC Address, Serial Number, Product Name, NCOS version, and any API path columns (added via Router API Copy to Routers) from each router. Results are written into the routers table.</p>
+<p>Fetches Hostname, MAC Address, Serial Number, Product Name, NCOS version, and any API path columns (added via Router API Copy to Routers) from each router. Results are written into the routers table. When a path returns no value, the cell is left blank.</p>
 
 <p><strong>Manual poll:</strong> Select routers and click <strong>Poll Routers</strong>. If all are selected, a confirmation dialog appears.</p>
 
@@ -159,6 +159,7 @@
   <li><strong>Sorting</strong> — Click a column header to sort. An arrow (↑/↓) shows the active column and direction. Two-level sort is supported.</li>
   <li><strong>Pagination</strong> — Use the pagination bar above and below the table. Choose rows per page (25, 50, 100, 200, 500).</li>
   <li><strong>Column resize</strong> — Drag the right edge of any column header to adjust width.</li>
+  <li><strong>Column reorder</strong> — When unlocked, drag a column header horizontally to reorder columns. The new order is saved when you save the routers file.</li>
   <li><strong>Delete column</strong> — When unlocked, custom columns (e.g. from Router API Copy to Routers) show a × button in the header. Click to remove the column from all routers. Standard columns cannot be deleted.</li>
 </ul>
 
@@ -220,7 +221,7 @@
 
 <p>Results are sortable and paginated. Ping results and Auto state persist across refreshes. When ping updates router status, the routers table scroll position is preserved.</p>
 
-<p>Cellular signal strength is shown in the expanded router row when the file is locked. Lock the file and click a row to expand and see Ethernet WAN, Cellular WAN, WiFi-as-WAN, and Ping cards with signal metrics.</p>
+<p>Cellular signal strength and WAN details are shown in the expanded router row when the file is locked. Lock the file and click a row to expand and see Ethernet WAN, Cellular WAN, WiFi-as-WAN, and Ping cards with signal metrics. The selection checkbox stays visible as a compact rounded box with space below for the expansion.</p>
 
 <h3 id="router-api">4.2 Router API</h3>
 

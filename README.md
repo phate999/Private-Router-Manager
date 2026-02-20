@@ -8,9 +8,9 @@ Private Router Manager is a web-based tool for administrating routers in private
 
 ## Highlights
 
-- **Router roster** — JSON/CSV editor with row selection, sortable columns, pagination, and lock protection
+- **Router roster** — JSON/CSV editor with row selection, sortable columns, pagination, lock protection, and column reordering (drag headers when unlocked)
 - **Discover Routers** — Find routers by IP subnet or range
-- **Poll Routers** — Fetch Hostname, MAC, Serial, Product Name, NCOS, and API path columns from routers. Manual or auto-poll (default: every 60 minutes)
+- **Poll Routers** — Fetch Hostname, MAC, Serial, Product Name, NCOS, and API path columns from routers. Empty responses shown as blank. Manual or auto-poll (default: every 60 minutes)
 - **Backup Configurations** (Monitoring tab) — Save config from selected routers to `configs/`
 - **Deploy** — Licenses, NCOS firmware, configuration files, or SDK apps to all routers at once
 - **Ping monitoring** — Check connectivity with auto-ping and offline event logging
