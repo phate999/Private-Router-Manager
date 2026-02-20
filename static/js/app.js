@@ -7,10 +7,81 @@
   'use strict';
 
   const PAGINATION_OPTS = [25, 50, 100, 200, 500];
-  const ROUTER_FIELDS = ['state', 'ip_address', 'hostname', 'mac', 'serial_number', 'product_name', 'ncos_version', 'username', 'password', 'port', 'created_at'];
+  const ROUTER_BASE_KEYS = ['state', 'ip_address', 'username', 'password', 'port', 'created_at'];
+  const DEFAULT_COLUMNS = ['State', 'IP Address', 'Hostname', 'Description', 'MAC', 'Serial Number', 'Asset ID', 'Product Name', 'NCOS Version', 'Username', 'Password', 'Port', 'Created At'];
+  const COLUMN_DEFAULT_PATHS = {
+    hostname: 'config.system.system_id',
+    mac: 'status.product_info.mac0',
+    serial_number: 'status.product_info.manufacturing.serial_num',
+    product_name: 'status.product_info.product_name',
+    ncos_version: 'status.fw_info',
+    description: 'config.system.desc',
+    asset_id: 'config.system.asset_id',
+  };
   const CREDENTIAL_FIELDS = ['username', 'password', 'port'];
-  const DEFAULT_COL_WIDTHS = { state: 60, ip_address: 130, port: 90 };
+  const READONLY_FIELDS = new Set(['created_at']);
+  const PATH_EXCLUDED_FIELDS = new Set(['state', 'ip_address']);
+  const DEFAULT_COL_WIDTHS = {
+    state: 72,
+    ip_address: 130,
+    hostname: 140,
+    description: 160,
+    mac: 145,
+    serial_number: 160,
+    asset_id: 120,
+    product_name: 140,
+    ncos_version: 200,
+    username: 100,
+    password: 100,
+    port: 90,
+  };
+  const HEADER_CHROME_PX = 48;  // space for sort arrow + resizer affordance
   const ACRONYMS = new Set(['ip', 'mac', 'ncos', 'nc']);
+
+  function normalizeColumnName(displayName) {
+    return String(displayName || '').trim().toLowerCase().replace(/\s+/g, '_') || '';
+  }
+
+  // Resolve dot+bracket paths: "status.wan.devices[0].diagnostics.RSRP" or "status.wan.devices[-1]...."
+  function getValueByPath(obj, pathStr) {
+    if (!obj || pathStr == null || pathStr === '') return undefined;
+    const path = String(pathStr).trim();
+    if (!path) return undefined;
+    const parts = [];
+    let cur = '';
+    let inBracket = false;
+    for (let i = 0; i < path.length; i++) {
+      const c = path[i];
+      if (c === '[') {
+        if (cur) { parts.push(cur); cur = ''; }
+        inBracket = true;
+      } else if (c === ']') {
+        if (inBracket && cur !== '') parts.push(isNaN(Number(cur)) ? cur : parseInt(cur, 10));
+        cur = ''; inBracket = false;
+      } else if (inBracket) {
+        cur += c;
+      } else if (c === '.') {
+        if (cur) { parts.push(cur); cur = ''; }
+      } else {
+        cur += c;
+      }
+    }
+    if (cur) parts.push(cur);
+    let v = obj;
+    for (const p of parts) {
+      if (v == null) return undefined;
+      v = v[p];
+    }
+    return v;
+  }
+
+  function toDotBracketPath(path) {
+    if (!path || typeof path !== 'string') return path;
+    const s = path.trim();
+    if (!s) return s;
+    // Normalize slash to dot for consistent traversal; support status/lan/[0] and status.lan.[0]
+    return s.replace(/\//g, '.').replace(/\|/g, '.');
+  }
 
   function prettyPrintFieldName(fieldKey) {
     return String(fieldKey || '')
@@ -21,7 +92,9 @@
 
   function normalizeRouterForSave(r) {
     const out = {};
-    ROUTER_FIELDS.forEach(f => {
+    const allKeys = new Set([...ROUTER_BASE_KEYS, ...getColumnFieldKeys()]);
+    allKeys.forEach(f => {
+      if (!(f in r) && !ROUTER_BASE_KEYS.includes(f)) return;
       if (f === 'port') {
         const v = r[f];
         out[f] = (typeof v === 'number' ? v : parseInt(v, 10)) || 8080;
@@ -32,13 +105,37 @@
       }
     });
     Object.keys(r).forEach(k => {
-      if (!ROUTER_FIELDS.includes(k) && r[k] != null && r[k] !== '') out[k] = r[k];
+      if (!allKeys.has(k) && r[k] != null && r[k] !== '') {
+        if (k === 'column_paths') {
+          if (typeof r[k] === 'object' && r[k] !== null && !Array.isArray(r[k])) out[k] = r[k];
+        } else out[k] = r[k];
+      }
     });
     return out;
   }
 
+  function sanitizeRouterColumnPaths(r) {
+    const cp = r?.column_paths;
+    if (cp != null && (typeof cp !== 'object' || Array.isArray(cp) || (typeof cp === 'string' && cp === '[object Object]'))) {
+      delete r.column_paths;
+    }
+    return r;
+  }
+
+  function getColumnFieldKeys() {
+    const cols = state.columns && state.columns.length ? state.columns : DEFAULT_COLUMNS;
+    return cols.map(c => normalizeColumnName(c)).filter(k => k && !PATH_EXCLUDED_FIELDS.has(k));
+  }
+
+  function getPathForRouter(router, field) {
+    const override = router?.column_paths && typeof router.column_paths === 'object' ? router.column_paths[field] : undefined;
+    return override != null && override !== '' ? String(override) : (state.columnDefaultPaths[field] || null);
+  }
+
   const state = {
     routers: [],
+    columns: [],
+    columnDefaultPaths: {},
     routerFileLocked: false,
     connectionTimeout: 2,
     connectionRetries: 1,
@@ -57,7 +154,10 @@
     pingPage: 0,
     pingPerPage: 100,
     routersRowSelected: new Set(),
+    routersRowExpanded: null,
     routersColumnWidths: {},
+    columnDisplayNames: {},
+    routerWanData: {},
     remoteApiPage: 0,
     remoteApiPerPage: 100,
   };
@@ -100,9 +200,13 @@
 
   const routersUpload = $('#routersUpload');
   const routersTable = $('#routersTable');
+  const routersTableSelect = $('#routersTableSelect');
   const routersHead = $('#routersHead');
+  const routersHeadSelect = $('#routersHeadSelect');
   const routersBody = $('#routersBody');
+  const routersBodySelect = $('#routersBodySelect');
   const routersTableWrap = $('#routersTableWrap');
+  const routersTableScroll = $('#routersTableScroll');
   const routersPaginationTop = $('#routersPaginationTop');
   const routersPaginationBottom = $('#routersPaginationBottom');
   const emptyState = $('#emptyState');
@@ -157,18 +261,35 @@
   const btnSettingsCancel = $('#btnSettingsCancel');
   const btnSettingsSave = $('#btnSettingsSave');
 
+  const BASE_COLUMNS = new Set(['state', 'ip_address', 'username', 'password', 'port', 'created_at']);
+
+  function ensureDefaultColumnPaths() {
+    Object.keys(COLUMN_DEFAULT_PATHS).forEach(f => {
+      if (!state.columnDefaultPaths[f]) {
+        state.columnDefaultPaths[f] = COLUMN_DEFAULT_PATHS[f];
+      }
+    });
+  }
+
   function getVisibleFields() {
-    let fields = state.routerFileLocked ? ROUTER_FIELDS.filter(f => !CREDENTIAL_FIELDS.includes(f)) : ROUTER_FIELDS;
-    fields = fields.filter(f => f !== 'state'); // state is shown only via the icon column
+    ensureDefaultColumnPaths();
+    let cols = state.columns && state.columns.length ? state.columns : DEFAULT_COLUMNS;
+    let fields = cols.map(c => normalizeColumnName(c)).filter(k => k);
+    fields = fields.filter(f => f !== 'state');
+    if (state.routerFileLocked) {
+      fields = fields.filter(f => !CREDENTIAL_FIELDS.includes(f));
+    }
     const hideWhenLocked = new Set(['state', ...CREDENTIAL_FIELDS]);
     const alwaysHide = new Set(['state']);
-    // Include extra columns (e.g. from Copy to Routers, Add Column, deploy results)
-    const seen = new Set(fields);
+    const seen = new Set(fields.map(normalizeColumnName));
+    const seenRaw = new Set(fields);
     const extra = [];
     state.routers.forEach(r => {
       Object.keys(r).forEach(k => {
-        if (!seen.has(k) && k && !alwaysHide.has(k) && !(state.routerFileLocked && hideWhenLocked.has(k))) {
-          seen.add(k);
+        const norm = normalizeColumnName(k);
+        if (!seen.has(norm) && !seenRaw.has(k) && k && !alwaysHide.has(norm) && !(state.routerFileLocked && hideWhenLocked.has(norm))) {
+          seen.add(norm);
+          seenRaw.add(k);
           extra.push(k);
         }
       });
@@ -180,6 +301,10 @@
     // When no router data, file must be unlocked and lock button disabled
     if (!state.routers.length) {
       state.routerFileLocked = false;
+    }
+    if (!state.routerFileLocked && state.routersRowExpanded != null) {
+      state.routersRowExpanded = null;
+      stopRoutersRowExpansionInterval();
     }
     const locked = state.routerFileLocked;
     const hasRouters = state.routers.length > 0;
@@ -208,12 +333,7 @@
     if (pollIntervalMinutes) pollIntervalMinutes.disabled = locked;
     routersToolbar?.classList.toggle('routers-locked', locked);
     routersTableWrap?.classList.toggle('routers-table-locked', locked);
-    const savedScroll = routersTableWrap ? { left: routersTableWrap.scrollLeft, top: routersTableWrap.scrollTop } : null;
     renderTable();
-    if (savedScroll && routersTableWrap) {
-      routersTableWrap.scrollLeft = savedScroll.left;
-      routersTableWrap.scrollTop = savedScroll.top;
-    }
   }
 
   function updateRoutersFilenameDisplay() {
@@ -227,19 +347,32 @@
   }
 
   function measureColumnWidth(fieldKey) {
-    if (!routersTable || !state.routers.length) return 100;
+    if (!routersTable) return 100;
     const measurer = document.createElement('span');
-    measurer.style.cssText = 'position:absolute;visibility:hidden;white-space:nowrap;pointer-events:none;';
+    measurer.style.cssText = 'position:absolute;visibility:hidden;white-space:nowrap;pointer-events:none;font:inherit;';
     document.body.appendChild(measurer);
-    const label = prettyPrintFieldName(fieldKey);
-    measurer.textContent = label || ' ';
+    const displayLabel = state.columnDisplayNames[fieldKey] || prettyPrintFieldName(fieldKey);
+    measurer.textContent = displayLabel || ' ';
     let maxW = measurer.offsetWidth;
-    state.routers.forEach(r => {
-      measurer.textContent = String(r[fieldKey] ?? '') || ' ';
+    const defaultPath = state.columnDefaultPaths[fieldKey];
+    if (defaultPath) {
+      measurer.textContent = defaultPath;
       maxW = Math.max(maxW, measurer.offsetWidth);
-    });
+    }
+    if (state.routers.length) {
+      state.routers.forEach(r => {
+        const path = getPathForRouter(r, fieldKey);
+        if (path && path !== defaultPath) {
+          measurer.textContent = path;
+          maxW = Math.max(maxW, measurer.offsetWidth);
+        }
+        measurer.textContent = String(r[fieldKey] ?? '') || ' ';
+        maxW = Math.max(maxW, measurer.offsetWidth);
+      });
+    }
     document.body.removeChild(measurer);
-    return Math.min(Math.max(maxW + 32, 60), 400);
+    const withChrome = maxW + HEADER_CHROME_PX;
+    return Math.min(Math.max(withChrome, 100), 450);
   }
 
   function applyColumnWidths() {
@@ -247,13 +380,13 @@
     const cols = routersTable.querySelectorAll('colgroup col');
     const fields = getVisibleFields();
     const stateW = state.routersColumnWidths['state'] ?? DEFAULT_COL_WIDTHS.state;
-    if (cols[1]) cols[1].style.width = stateW + 'px';
+    if (cols[0]) cols[0].style.width = stateW + 'px';
     const PORT_MIN_WIDTH = 90;
     fields.forEach((f, i) => {
       const defaultW = DEFAULT_COL_WIDTHS[f];
       let w = state.routersColumnWidths[f] ?? (defaultW != null ? Math.max(defaultW, measureColumnWidth(f)) : measureColumnWidth(f));
       if (f === 'port') w = Math.max(w, PORT_MIN_WIDTH);
-      const colEl = cols[i + 2];
+      const colEl = cols[i + 1];
       if (colEl) colEl.style.width = w + 'px';
     });
   }
@@ -270,14 +403,14 @@
       const th = dataThs[resizeCol];
       if (!th) return;
       const dx = e.clientX - startX;
-      const newW = Math.max(40, startW + dx);
+      const newW = Math.max(80, startW + dx);
       const fields = getVisibleFields();
       const fieldName = resizeCol === 0 ? 'state' : fields[resizeCol - 1];
       if (fieldName) state.routersColumnWidths[fieldName] = newW;
       const colgroup = routersTable.querySelector('colgroup');
       if (colgroup) {
-        const col = colgroup.querySelectorAll('col')[resizeCol + 1];
-        if (col) col.style.width = newW + 'px';
+          const col = colgroup.querySelectorAll('col')[resizeCol];
+          if (col) col.style.width = newW + 'px';
       }
     };
     const onMouseUp = () => {
@@ -286,6 +419,7 @@
       document.removeEventListener('mouseup', onMouseUp);
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
+      saveDrawerUI?.();
     };
 
     dataThs.forEach((th, colIdx) => {
@@ -300,7 +434,7 @@
           e.stopPropagation();
           resizeCol = colIdx;
           startX = e.clientX;
-          const col = routersTable.querySelector(`colgroup col:nth-child(${colIdx + 2})`);
+          const col = routersTable.querySelector(`colgroup col:nth-child(${colIdx + 1})`);
           startW = col ? parseInt(col.style.width, 10) || 100 : 100;
           document.addEventListener('mousemove', onMouseMove);
           document.addEventListener('mouseup', onMouseUp);
@@ -339,16 +473,13 @@
       s.primary = field;
       s.primaryDir = 1;
     }
-    const scrollLeft = routersTableWrap?.scrollLeft ?? 0;
-    const scrollTop = routersTableWrap?.scrollTop ?? 0;
     renderTable();
-    if (routersTableWrap) {
-      routersTableWrap.scrollLeft = scrollLeft;
-      routersTableWrap.scrollTop = scrollTop;
-    }
   }
 
   function renderTable() {
+    const savedScroll = (routersTableWrap && routersTableScroll)
+      ? { left: routersTableScroll.scrollLeft, top: routersTableWrap.scrollTop }
+      : (routersTableWrap ? { left: routersTableWrap.scrollLeft, top: routersTableWrap.scrollTop } : null);
     // When no router data, file must be unlocked and lock button disabled
     if (!state.routers.length) {
       state.routerFileLocked = false;
@@ -366,7 +497,6 @@
     if (state.routers.length !== (state._routersRowCountPrev ?? -1)) {
       state._routersRowCountPrev = state.routers.length;
       state.routersRowSelected.clear();
-      state.routers.forEach((_, i) => state.routersRowSelected.add(i));
     }
     let rows = [...state.routers];
     const p = state.routersSort.primary;
@@ -382,9 +512,29 @@
 
     if (routersTableWrap) routersTableWrap.style.display = 'block';
     emptyState?.classList.remove('visible');
+    let savedExpansionHTML = null;
+    if (state.routersRowExpanded != null && routersBody) {
+      const expandedRow = routersBody.querySelector(`tr.routers-expanded-row[data-state-row="${state.routersRowExpanded}"]`);
+      const wrap = expandedRow?.querySelector('.routers-wan-cards-wrap');
+      if (wrap?.innerHTML && wrap.querySelector('.routers-wan-sections')) {
+        savedExpansionHTML = wrap.innerHTML;
+      }
+    }
     if (routersHead) routersHead.innerHTML = '';
     if (routersBody) routersBody.innerHTML = '';
-    if (!routersTable || !routersHead || !routersBody) return;
+    if (routersHeadSelect) routersHeadSelect.innerHTML = '';
+    if (routersBodySelect) routersBodySelect.innerHTML = '';
+    if (!routersTable || !routersHead || !routersBody) {
+      if (savedScroll && routersTableWrap) {
+        requestAnimationFrame(() => {
+          if (routersTableScroll) routersTableScroll.scrollLeft = savedScroll.left;
+          routersTableWrap.scrollTop = savedScroll.top;
+        });
+      }
+      return;
+    }
+
+    const useSplit = routersTableSelect && routersHeadSelect && routersBodySelect && routersTableScroll;
 
     let colgroup = routersTable.querySelector('colgroup');
     if (!colgroup) {
@@ -392,10 +542,6 @@
       routersTable.insertBefore(colgroup, routersHead);
     }
     colgroup.innerHTML = '';
-    const colSelect = document.createElement('col');
-    colSelect.classList.add('col-select');
-    colSelect.style.width = '2.2rem';
-    colgroup.appendChild(colSelect);
     const colState = document.createElement('col');
     colState.classList.add('col-state');
     colState.style.width = '3.75rem';
@@ -411,22 +557,43 @@
     colgroup.appendChild(colActions);
 
     const headerRow = document.createElement('tr');
-    const thSelectAll = document.createElement('th');
-    thSelectAll.className = 'col-select';
-    const selectAllCb = document.createElement('input');
-    selectAllCb.type = 'checkbox';
-    selectAllCb.className = 'routers-select-all';
-    selectAllCb.title = 'Select all routers';
-    const totalRowCount = state.routers.length;
-    selectAllCb.checked = totalRowCount > 0 && totalRowCount === state.routersRowSelected.size;
-    selectAllCb.indeterminate = state.routersRowSelected.size > 0 && state.routersRowSelected.size < totalRowCount;
-    selectAllCb.onchange = () => {
-      if (selectAllCb.checked) state.routers.forEach((_, i) => state.routersRowSelected.add(i));
-      else state.routersRowSelected.clear();
-      renderTable();
-    };
-    thSelectAll.appendChild(selectAllCb);
-    headerRow.appendChild(thSelectAll);
+    if (useSplit && routersHeadSelect) {
+      const selectHeaderRow = document.createElement('tr');
+      const thSelectAll = document.createElement('th');
+      thSelectAll.className = 'col-select';
+      const selectAllCb = document.createElement('input');
+      selectAllCb.type = 'checkbox';
+      selectAllCb.className = 'routers-select-all';
+      selectAllCb.title = 'Select all routers';
+      const totalRowCount = state.routers.length;
+      selectAllCb.checked = totalRowCount > 0 && totalRowCount === state.routersRowSelected.size;
+      selectAllCb.indeterminate = state.routersRowSelected.size > 0 && state.routersRowSelected.size < totalRowCount;
+      selectAllCb.onchange = () => {
+        if (selectAllCb.checked) state.routers.forEach((_, i) => state.routersRowSelected.add(i));
+        else state.routersRowSelected.clear();
+        renderTable();
+      };
+      thSelectAll.appendChild(selectAllCb);
+      selectHeaderRow.appendChild(thSelectAll);
+      routersHeadSelect.appendChild(selectHeaderRow);
+    } else {
+      const thSelectAll = document.createElement('th');
+      thSelectAll.className = 'col-select';
+      const selectAllCb = document.createElement('input');
+      selectAllCb.type = 'checkbox';
+      selectAllCb.className = 'routers-select-all';
+      selectAllCb.title = 'Select all routers';
+      const totalRowCount = state.routers.length;
+      selectAllCb.checked = totalRowCount > 0 && totalRowCount === state.routersRowSelected.size;
+      selectAllCb.indeterminate = state.routersRowSelected.size > 0 && state.routersRowSelected.size < totalRowCount;
+      selectAllCb.onchange = () => {
+        if (selectAllCb.checked) state.routers.forEach((_, i) => state.routersRowSelected.add(i));
+        else state.routersRowSelected.clear();
+        renderTable();
+      };
+      thSelectAll.appendChild(selectAllCb);
+      headerRow.appendChild(thSelectAll);
+    }
     const sortPrimary = state.routersSort.primary;
     const sortDir = state.routersSort.primaryDir;
     const sortSymbol = sortDir === 1 ? '\u2191' : '\u2193';
@@ -438,20 +605,57 @@
     thState.className = 'col-state routers-sortable';
     thState.dataset.field = 'state';
     thState.title = 'State (Online/Offline)';
-    thState.appendChild(document.createTextNode('State'));
+    if (state.routerFileLocked) {
+      thState.appendChild(document.createTextNode(state.columnDisplayNames.state || 'State'));
+    } else {
+      const stateNameInput = document.createElement('input');
+      stateNameInput.type = 'text';
+      stateNameInput.className = 'routers-col-name-input';
+      stateNameInput.value = state.columnDisplayNames.state || 'State';
+      stateNameInput.title = 'Edit column name';
+      stateNameInput.onclick = (e) => e.stopPropagation();
+      stateNameInput.onchange = () => {
+        const v = stateNameInput.value.trim();
+        state.columnDisplayNames.state = v || 'State';
+        renderTable();
+        saveDrawerUI?.();
+      };
+      thState.insertBefore(stateNameInput, thState.querySelector('.sort-arrow'));
+    }
     const stateArrow = document.createElement('span');
     stateArrow.className = 'sort-arrow';
     stateArrow.setAttribute('aria-hidden', 'true');
     thState.appendChild(stateArrow);
     setSortArrow(thState, 'state');
     headerRow.appendChild(thState);
-    const deletableFields = new Set(fields.filter(f => !ROUTER_FIELDS.includes(f)));
+    const deletableFields = new Set(fields.filter(f => !BASE_COLUMNS.has(f)));
     fields.forEach(f => {
       const th = document.createElement('th');
       th.className = 'routers-sortable';
       if (f === 'port') th.classList.add('col-port');
+      if (!state.routerFileLocked) {
+        th.classList.add('col-draggable');
+        th.draggable = true;
+        th.title = (th.title || '') + (th.title ? ' • ' : '') + 'Drag to reorder column';
+      }
       th.dataset.field = f;
-      th.appendChild(document.createTextNode(prettyPrintFieldName(f)));
+      if (state.routerFileLocked) {
+        th.appendChild(document.createTextNode(state.columnDisplayNames[f] || prettyPrintFieldName(f)));
+      } else {
+        const nameInput = document.createElement('input');
+        nameInput.type = 'text';
+        nameInput.className = 'routers-col-name-input';
+        nameInput.value = state.columnDisplayNames[f] || prettyPrintFieldName(f);
+        nameInput.title = 'Edit column name';
+        nameInput.onclick = (e) => e.stopPropagation();
+        nameInput.onchange = () => {
+          const v = nameInput.value.trim();
+          state.columnDisplayNames[f] = v || prettyPrintFieldName(f);
+          renderTable();
+          saveDrawerUI?.();
+        };
+        th.appendChild(nameInput);
+      }
       const arrow = document.createElement('span');
       arrow.className = 'sort-arrow';
       arrow.setAttribute('aria-hidden', 'true');
@@ -491,6 +695,14 @@
     const start = page * perPage;
     const pageRows = rows.slice(start, start + perPage);
 
+    if (state.routersRowExpanded != null) {
+      const expandedInPage = pageRows.some((_, j) => rowToStateIdx[start + j] === state.routersRowExpanded);
+      if (!expandedInPage) {
+        state.routersRowExpanded = null;
+        stopRoutersRowExpansionInterval();
+      }
+    }
+
     [routersPaginationTop, routersPaginationBottom].forEach(container => {
       if (!container) return;
       container.innerHTML = '';
@@ -511,6 +723,9 @@
       const rowIdx = start + j;
       const stateRowIdx = rowToStateIdx[rowIdx];
       const tr = document.createElement('tr');
+      tr.dataset.stateRow = String(stateRowIdx);
+      if (state.routerFileLocked) tr.classList.add('routers-row-clickable');
+      if (state.routersRowExpanded === stateRowIdx) tr.classList.add('routers-row-has-expansion');
       const tdSelect = document.createElement('td');
       tdSelect.className = 'col-select';
       const rowCb = document.createElement('input');
@@ -520,14 +735,23 @@
       rowCb.onchange = () => {
         if (rowCb.checked) state.routersRowSelected.add(stateRowIdx);
         else state.routersRowSelected.delete(stateRowIdx);
-        const sel = routersTable?.querySelector('.routers-select-all');
+        const sel = (routersTableSelect || routersTable)?.querySelector('.routers-select-all');
         if (sel) {
           sel.checked = state.routers.length > 0 && state.routers.length === state.routersRowSelected.size;
           sel.indeterminate = state.routersRowSelected.size > 0 && state.routersRowSelected.size < state.routers.length;
         }
+        updateRemoteApiButtonState?.();
       };
       tdSelect.appendChild(rowCb);
-      tr.appendChild(tdSelect);
+      if (useSplit && routersBodySelect) {
+        const trSelect = document.createElement('tr');
+        trSelect.dataset.stateRow = String(stateRowIdx);
+        if (state.routersRowExpanded === stateRowIdx) trSelect.classList.add('routers-row-has-expansion');
+        trSelect.appendChild(tdSelect);
+        routersBodySelect.appendChild(trSelect);
+      } else {
+        tr.appendChild(tdSelect);
+      }
       const st = String(row.state || '').trim().toLowerCase();
       const isOnline = st === 'online' || st === '';  // empty = assume Online until ping updates
       const tdState = document.createElement('td');
@@ -541,16 +765,57 @@
       fields.forEach(f => {
         const td = document.createElement('td');
         if (f === 'port') td.classList.add('col-port');
-        const input = document.createElement(f === 'port' ? 'input' : 'input');
-        input.type = f === 'port' ? 'number' : 'text';
-        if (f === 'password') input.type = 'password';
-        input.value = row[f] ?? '';
-        input.dataset.row = stateRowIdx;
-        input.dataset.field = f;
-        input.onchange = () => {
-          state.routers[stateRowIdx][f] = f === 'port' ? (parseInt(input.value, 10) || 8080) : input.value;
-        };
-        td.appendChild(input);
+        const router = state.routers[stateRowIdx];
+        const path = getPathForRouter(router, f);
+        const wanData = state.routerWanData[stateRowIdx];
+        if (path && !PATH_EXCLUDED_FIELDS.has(f)) {
+          const val = resolveColumnPath(router, wanData, path, f);
+          const wrap = document.createElement('div');
+          wrap.className = 'routers-path-cell';
+          const span = document.createElement('span');
+          span.className = val != null ? 'routers-path-value' : 'routers-path-value routers-path-empty';
+          span.textContent = val != null ? val : '';
+          span.title = path;
+          wrap.appendChild(span);
+          if (!state.routerFileLocked) {
+            const pathInput = document.createElement('input');
+            pathInput.type = 'text';
+            pathInput.className = 'routers-path-input';
+            pathInput.value = path;
+            pathInput.placeholder = 'e.g. status.product_info.product_name, status.wan.devices[0].diagnostics.RSRP';
+            pathInput.title = 'Edit API path (per router)';
+            pathInput.dataset.field = f;
+            pathInput.dataset.row = String(stateRowIdx);
+            pathInput.onchange = () => {
+              const newPath = pathInput.value.trim();
+              if (!router.column_paths) router.column_paths = {};
+              if (newPath) router.column_paths[f] = newPath;
+              else {
+                delete router.column_paths[f];
+                if (Object.keys(router.column_paths).length === 0) delete router.column_paths;
+              }
+              renderTable();
+            };
+            wrap.appendChild(pathInput);
+          }
+          td.appendChild(wrap);
+        } else if (READONLY_FIELDS.has(f)) {
+          const span = document.createElement('span');
+          span.className = 'routers-readonly-value';
+          span.textContent = row[f] ?? '—';
+          td.appendChild(span);
+        } else {
+          const input = document.createElement('input');
+          input.type = f === 'port' ? 'number' : 'text';
+          if (f === 'password') input.type = 'password';
+          input.value = row[f] ?? '';
+          input.dataset.row = stateRowIdx;
+          input.dataset.field = f;
+          input.onchange = () => {
+            state.routers[stateRowIdx][f] = f === 'port' ? (parseInt(input.value, 10) || 8080) : input.value;
+          };
+          td.appendChild(input);
+        }
         tr.appendChild(td);
       });
       const tdActions = document.createElement('td');
@@ -562,21 +827,98 @@
       delBtn.onclick = () => deleteRow(stateRowIdx);
       tdActions.appendChild(delBtn);
       tr.appendChild(tdActions);
+      if (state.routerFileLocked) {
+        tr.addEventListener('click', (e) => {
+          if (e.target.closest('.col-select') || e.target.closest('.row-actions') || e.target.closest('.btn-icon')) return;
+          handleRoutersRowExpandClick(stateRowIdx);
+        });
+      }
       routersBody.appendChild(tr);
+      if (state.routersRowExpanded === stateRowIdx) {
+        const expTr = document.createElement('tr');
+        expTr.className = 'routers-expanded-row';
+        expTr.dataset.stateRow = String(stateRowIdx);
+        const expTd = document.createElement('td');
+        expTd.colSpan = useSplit ? 1 + fields.length + 1 : 2 + fields.length + 1;
+        expTd.className = 'routers-expanded-cell';
+        const wrap = document.createElement('div');
+        wrap.className = 'routers-wan-cards-wrap';
+        if (savedExpansionHTML && state.routersRowExpanded === stateRowIdx) {
+          wrap.innerHTML = savedExpansionHTML;
+        }
+        expTd.appendChild(wrap);
+        expTr.appendChild(expTd);
+        routersBody.appendChild(expTr);
+        if (useSplit && routersBodySelect) {
+          const expTrSelect = document.createElement('tr');
+          expTrSelect.className = 'routers-expanded-row routers-expanded-placeholder';
+          expTrSelect.dataset.stateRow = String(stateRowIdx);
+          const expTdSelect = document.createElement('td');
+          expTdSelect.className = 'col-select routers-expanded-cell-placeholder';
+          expTrSelect.appendChild(expTdSelect);
+          routersBodySelect.appendChild(expTrSelect);
+        }
+      }
     });
 
     if (state.routers.length === 0) {
       routersTableWrap.style.display = 'none';
       emptyState?.classList.add('visible');
     }
+    routersTable?.classList.toggle('routers-has-expanded', state.routersRowExpanded != null);
+    routersTableSelect?.classList.toggle('routers-has-expanded', state.routersRowExpanded != null);
     applyColumnWidths();
     setupColumnResize();
+    updateRemoteApiButtonState?.();
+    if (savedScroll && routersTableWrap) {
+      requestAnimationFrame(() => {
+        if (routersTableScroll) routersTableScroll.scrollLeft = savedScroll.left;
+        routersTableWrap.scrollTop = savedScroll.top;
+      });
+    }
+    if (useSplit && routersBody && routersBodySelect) {
+      requestAnimationFrame(() => {
+        syncSelectTableHeights();
+        if (state.routersRowExpanded != null) {
+          setTimeout(syncSelectTableHeights, 350);
+        }
+        if (!state.routerFileLocked) {
+          setTimeout(syncSelectTableHeights, 100);
+        }
+      });
+    }
+  }
+
+  function syncSelectTableHeights() {
+    if (!routersBody || !routersBodySelect) return;
+    const dataHeadRow = routersHead?.querySelector('tr');
+    const selectHeadRow = routersHeadSelect?.querySelector('tr');
+    if (dataHeadRow && selectHeadRow) {
+      const th = selectHeadRow.querySelector('th');
+      if (th) {
+        const h = dataHeadRow.offsetHeight;
+        th.style.height = h + 'px';
+        th.style.minHeight = h + 'px';
+      }
+    }
+    const dataRows = routersBody.querySelectorAll('tr');
+    const selectRows = routersBodySelect.querySelectorAll('tr');
+    if (dataRows.length !== selectRows.length) return;
+    dataRows.forEach((dataTr, i) => {
+      const selectTr = selectRows[i];
+      const td = selectTr.querySelector('td');
+      if (td) {
+        const h = dataTr.offsetHeight;
+        td.style.height = h + 'px';
+        td.style.minHeight = h + 'px';
+      }
+    });
   }
 
   function collectFromTable() {
     if (!routersBody) return state.routers;
     $$('#routersBody tr', document).forEach(tr => {
-      const inputs = tr.querySelectorAll('td:not(.row-actions):not(.col-select):not(.col-state) input');
+      const inputs = tr.querySelectorAll('td:not(.row-actions):not(.col-select):not(.col-state) input:not(.routers-path-input)');
       const firstInput = inputs[0];
       const stateRowIdx = firstInput ? parseInt(firstInput.dataset.row ?? '-1', 10) : -1;
       if (stateRowIdx >= 0 && stateRowIdx < state.routers.length) {
@@ -597,29 +939,155 @@
   }
 
   function deleteColumn(field) {
-    if (ROUTER_FIELDS.includes(field)) return;
+    if (BASE_COLUMNS.has(field)) return;
     showConfirmDelete('Delete column?', `Column "${field}" will be removed from all routers.`, () => {
+      collectFromTable();
       state.routers.forEach(r => delete r[field]);
+      delete state.columnDefaultPaths[field];
+      if (state.columns && state.columns.length) {
+        state.columns = state.columns.filter(c => normalizeColumnName(c) !== field);
+      }
       renderTable();
+      if (state.routers.length && state.lastFile) {
+        fetch('/api/routers/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            routers: state.routers,
+            columns: state.columns,
+            column_default_paths: state.columnDefaultPaths,
+          }),
+        }).catch(() => {});
+      }
     });
+  }
+
+  function reorderColumns(fromIdx, toIdx) {
+    if (fromIdx === toIdx || fromIdx < 0 || toIdx < 0) return;
+    const fields = getVisibleFields();
+    if (fromIdx >= fields.length || toIdx >= fields.length) return;
+    const newFields = [...fields];
+    const [removed] = newFields.splice(fromIdx, 1);
+    newFields.splice(toIdx, 0, removed);
+    const stateCol = state.columns?.find(c => normalizeColumnName(c) === 'state') || 'State';
+    const seenNorm = new Set();
+    const newColumns = [stateCol, ...newFields.map(f => {
+      const norm = normalizeColumnName(f);
+      if (seenNorm.has(norm)) return null;
+      seenNorm.add(norm);
+      const dn = state.columns?.find(c => normalizeColumnName(c) === f);
+      return dn != null ? dn : (state.columnDisplayNames[f] || prettyPrintFieldName(f));
+    }).filter(Boolean)];
+    state.columns = newColumns;
+    renderTable();
+    saveDrawerUI?.();
+    if (state.routers.length && state.lastFile) {
+      fetch('/api/routers/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          routers: state.routers,
+          columns: state.columns,
+          column_default_paths: state.columnDefaultPaths,
+        }),
+      }).catch(() => {});
+    }
   }
 
   function addRow() {
     const r = {};
-    ROUTER_FIELDS.forEach(f => {
+    ROUTER_BASE_KEYS.forEach(f => {
       if (f === 'port') r[f] = 8080;
       else if (f === 'username') r[f] = 'admin';
       else if (f === 'created_at') r[f] = new Date().toISOString();
       else r[f] = '';
     });
+    getColumnFieldKeys().forEach(k => { if (!(k in r)) r[k] = ''; });
     state.routers.push(r);
     renderTable();
+  }
+
+  function updatePathColumnCells(stateRowIdx) {
+    const pathCols = Object.keys(state.columnDefaultPaths).filter(f => !PATH_EXCLUDED_FIELDS.has(f));
+    if (!pathCols.length) return;
+    const tr = routersBody?.querySelector(`tr[data-state-row="${stateRowIdx}"]:not(.routers-expanded-row)`);
+    if (!tr) return;
+    const router = state.routers[stateRowIdx];
+    const wanData = state.routerWanData[stateRowIdx];
+    const fields = getVisibleFields();
+    const tds = tr.querySelectorAll('td:not(.col-select):not(.col-state):not(.row-actions)');
+    fields.forEach((f, i) => {
+      const path = getPathForRouter(router, f);
+        if (path && !PATH_EXCLUDED_FIELDS.has(f) && tds[i]) {
+        const span = tds[i].querySelector('.routers-path-value');
+        if (span) {
+          const val = resolveColumnPath(router, wanData, path, f);
+          span.textContent = val != null ? val : '';
+          span.classList.toggle('routers-path-empty', val == null);
+        }
+      }
+    });
+  }
+
+  const PATH_TO_FLAT_FALLBACK = {
+    'config.system.system_id': 'hostname',
+    'config.system.desc': 'description',
+    'config.system.asset_id': 'asset_id',
+    'status.product_info.product_name': 'product_name',
+    'status.product_info.mac0': 'mac',
+    'status.product_info.mac': 'mac',
+    'status.product_info.manufacturing.serial_num': 'serial_number',
+    'status.product_info.manufacturing.serial_number': 'serial_number',
+    'status.product_info.serial_num': 'serial_number',
+    'status.product_info.serial_number': 'serial_number',
+    'status.fw_info': 'ncos_version',
+  };
+
+  function resolveColumnPath(router, wanData, path, field) {
+    if (!path || typeof path !== 'string') return null;
+    const pathNorm = toDotBracketPath(path);
+    function resolveFirstMdm(obj, remainder) {
+      if (!obj || typeof obj !== 'object') return undefined;
+      const mdmKey = Object.keys(obj).find(k => k.toLowerCase().startsWith('mdm'));
+      if (!mdmKey) return undefined;
+      const mdmVal = obj[mdmKey];
+      if (remainder) return getValueByPath(mdmVal, remainder);
+      return mdmVal;
+    }
+    const first = (pathNorm.split('.')[0] || '').split('[')[0].toLowerCase();
+    let val;
+    if (first === 'first_mdm' || first === 'firstmdm') {
+      const remainder = pathNorm.replace(/^first_mdm\.?/i, '').replace(/^firstmdm\.?/i, '');
+      val = wanData ? resolveFirstMdm(wanData, remainder || null) : undefined;
+      if (val == null && router) val = resolveFirstMdm(router, remainder || null);
+    } else {
+      val = router ? getValueByPath(router, pathNorm) : undefined;
+      if (val == null && wanData) val = getValueByPath(wanData, pathNorm);
+    }
+    if (val == null && router) {
+      const fallback = PATH_TO_FLAT_FALLBACK[pathNorm] || PATH_TO_FLAT_FALLBACK[pathNorm.replace(/\.data$/, '')];
+      if (fallback && router[fallback] != null) val = router[fallback];
+      if (val == null && router[pathNorm] != null) val = router[pathNorm];  // poll stores by path key
+      if (val == null && field && router[field] != null) val = router[field];  // poll stores by field key
+    }
+    if (val == null) return null;
+    if (typeof val === 'object') return JSON.stringify(val);
+    return String(val);
   }
 
   function addColumn() {
     const name = prompt('Column name (for custom deploy results):', '');
     if (!name) return;
-    const key = name.trim().toLowerCase().replace(/\s+/g, '_') || 'column';
+    const displayName = name.trim() || 'Column';
+    const key = normalizeColumnName(displayName) || 'column';
+    const pathInput = prompt('Optional API path (e.g. status.product_info.product_name, status.wan.devices[0].diagnostics.RSRP). Leave blank for editable column.', '');
+    const path = (pathInput || '').trim();
+    if (path) state.columnDefaultPaths[key] = toDotBracketPath(path);
+    else delete state.columnDefaultPaths[key];
+    if (!state.columns.length) state.columns = [...DEFAULT_COLUMNS];
+    if (!state.columns.some(c => normalizeColumnName(c) === key)) {
+      state.columns.push(displayName);
+    }
     state.routers.forEach(r => { if (!(key in r)) r[key] = ''; });
     renderTable();
   }
@@ -631,7 +1099,12 @@
     }
     collectFromTable();
     const routersToSave = state.routers.map(normalizeRouterForSave);
-    const blob = new Blob([JSON.stringify({ routers: routersToSave }, null, 2)], { type: 'application/json' });
+    const cols = state.columns && state.columns.length ? state.columns : DEFAULT_COLUMNS;
+    const blob = new Blob([JSON.stringify({
+      columns: cols,
+      column_default_paths: state.columnDefaultPaths,
+      routers: routersToSave,
+    }, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = state.lastFile || 'routers.json';
@@ -648,7 +1121,8 @@
     let filename = state.lastFile || 'routers.json';
     if (!filename.toLowerCase().endsWith('.json')) filename += '.json';
     const routersToSave = state.routers.map(normalizeRouterForSave);
-    const data = { routers: routersToSave, filename };
+    const cols = state.columns && state.columns.length ? state.columns : DEFAULT_COLUMNS;
+    const data = { columns: cols, column_default_paths: state.columnDefaultPaths, routers: routersToSave, filename };
     function doSave() {
       fetch('/api/routers/save', {
         method: 'POST',
@@ -691,7 +1165,8 @@
     if (!filename.toLowerCase().endsWith('.json')) filename += '.json';
     collectFromTable();
     const routersToSave = state.routers.map(normalizeRouterForSave);
-    const data = { routers: routersToSave, filename };
+    const cols = state.columns && state.columns.length ? state.columns : DEFAULT_COLUMNS;
+    const data = { columns: cols, column_default_paths: state.columnDefaultPaths, routers: routersToSave, filename };
     function performSaveAs() {
       fetch('/api/routers/save', {
         method: 'POST',
@@ -739,7 +1214,9 @@
           showDeployStatus(body.error, true);
           return;
         }
-        state.routers = body.routers || [];
+        state.routers = (body.routers || []).map(sanitizeRouterColumnPaths);
+        state.columns = body.columns && body.columns.length ? body.columns : [];
+        state.columnDefaultPaths = body.column_default_paths && typeof body.column_default_paths === 'object' ? { ...body.column_default_paths } : {};
         state.lastFile = file.name || '';
         updateRoutersFilenameDisplay();
         renderTable();
@@ -794,6 +1271,7 @@
       if (el.classList.contains('active') && drawer.classList.contains('expanded')) {
         drawer.classList.remove('expanded');
         updateDrawerArrows();
+        saveDrawerUI?.();
       } else {
         setDrawerTab(tabName);
       }
@@ -802,8 +1280,40 @@
   setupDrawerTabClick(drawerTabDeployment, 'deployment');
   setupDrawerTabClick(drawerTabMonitoring, 'monitoring');
   setupDrawerTabClick(drawerTabLogs, 'logs');
-  drawer.classList.add('expanded');
-  setDrawerTab('deployment');
+  let drawerRestored = false;
+  try {
+    const uiRaw = localStorage.getItem('prm_drawerUI');
+    if (uiRaw) {
+      const ui = JSON.parse(uiRaw);
+      const tab = ui.drawerTab || 'deployment';
+      const tabs = [
+        { tab: drawerTabDeployment, pane: drawerPaneDeployment, name: 'deployment' },
+        { tab: drawerTabMonitoring, pane: drawerPaneMonitoring, name: 'monitoring' },
+        { tab: drawerTabLogs, pane: drawerPaneLogs, name: 'logs' },
+      ];
+      tabs.forEach(({ tab: t, pane: p, name }) => {
+        if (name === tab) {
+          t?.classList.add('active');
+          p?.classList.add('active');
+        } else {
+          t?.classList.remove('active');
+          p?.classList.remove('active');
+        }
+      });
+      if (ui.drawerExpanded === false) {
+        drawer.classList.remove('expanded');
+      } else {
+        drawer.classList.add('expanded');
+      }
+      updateDrawerArrows();
+      if (tab === 'logs') loadLogFileList?.();
+      drawerRestored = true;
+    }
+  } catch (_) {}
+  if (!drawerRestored) {
+    drawer.classList.add('expanded');
+    setDrawerTab('deployment');
+  }
 
   // Drawer resize
   const drawerResizeHandle = $('#drawerResizeHandle');
@@ -1223,8 +1733,10 @@
             : 'Discover failed.';
           showDeployStatus(msg, true);
         } else {
-          state.routers = body.routers || [];
+          state.routers = (body.routers || []).map(sanitizeRouterColumnPaths);
           if (body.last_file) state.lastFile = body.last_file;
+          if (body.columns && body.columns.length) state.columns = body.columns;
+          if (body.column_default_paths && typeof body.column_default_paths === 'object') state.columnDefaultPaths = { ...body.column_default_paths };
           renderTable();
           updateRoutersFilenameDisplay();
           const status = body.log_file ? `Discover complete. Log: ${body.log_file}.` : 'Discover complete.';
@@ -1236,7 +1748,11 @@
 
   function pollRoutersWithStream(routers, onProgress, onComplete) {
     const useStream = routers.length > 50;
-    const body = JSON.stringify({ routers: routers, stream: useStream });
+    const body = JSON.stringify({
+      routers,
+      stream: useStream,
+      column_default_paths: state.columnDefaultPaths,
+    });
     return fetch('/api/get-router-info', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1282,19 +1798,28 @@
     pollRoutersWithStream(routers,
       (ip, router) => {
         const idx = state.routers.findIndex(r => (r.ip_address || '').split(':')[0] === ip);
-        if (idx >= 0) state.routers[idx] = router;
+        if (idx >= 0) {
+          const existing = state.routers[idx];
+          const preserved = existing?.column_paths && typeof existing.column_paths === 'object' ? existing.column_paths : undefined;
+          state.routers[idx] = router;
+          if (preserved) state.routers[idx].column_paths = preserved;
+        }
         renderTable();
       },
       (routersResult) => {
-        if (routersResult) state.routers = routersResult;
-        const savedScroll = routersTableWrap ? { left: routersTableWrap.scrollLeft, top: routersTableWrap.scrollTop } : null;
-        renderTable();
-        if (savedScroll && routersTableWrap) {
-          requestAnimationFrame(() => {
-            routersTableWrap.scrollLeft = savedScroll.left;
-            routersTableWrap.scrollTop = savedScroll.top;
+        if (routersResult) {
+          const columnPathsByIp = {};
+          state.routers.forEach(r => {
+            const ip = (r.ip_address || '').split(':')[0];
+            if (ip && r.column_paths && typeof r.column_paths === 'object') columnPathsByIp[ip] = r.column_paths;
+          });
+          state.routers = routersResult.map(sanitizeRouterColumnPaths);
+          state.routers.forEach(server => {
+            const ip = (server.ip_address || '').split(':')[0];
+            if (ip && columnPathsByIp[ip]) server.column_paths = columnPathsByIp[ip];
           });
         }
+        renderTable();
         showDeployStatus?.('Poll complete.', false);
       }
     ).catch(e => showDeployStatus?.('Poll failed: ' + e.message, true));
@@ -1304,41 +1829,11 @@
 
   if (btnPollRouters) {
     btnPollRouters.addEventListener('click', () => {
-      const selected = [...state.routersRowSelected].filter(i => i >= 0 && i < state.routers.length);
-      if (!selected.length) {
-        showDeployStatus('Select one or more routers.', true);
+      if (!state.routers.length) {
+        showDeployStatus('Load routers file first.', true);
         return;
       }
-      const selectAllCb = routersTable?.querySelector('.routers-select-all');
-      const allSelected = selectAllCb?.checked && selected.length === state.routers.length;
-      const doPoll = () => {
-        const routers = selected.map(i => state.routers[i]);
-        showDeployStatus('Polling routers...', false);
-        pollRoutersWithStream(routers,
-          (ip, router) => {
-            const idx = state.routers.findIndex(r => (r.ip_address || '').split(':')[0] === ip);
-            if (idx >= 0) state.routers[idx] = router;
-            renderTable();
-          },
-          (routersResult) => {
-            if (routersResult) state.routers = routersResult;
-            const savedScroll = routersTableWrap ? { left: routersTableWrap.scrollLeft, top: routersTableWrap.scrollTop } : null;
-            renderTable();
-            if (savedScroll && routersTableWrap) {
-              requestAnimationFrame(() => {
-                routersTableWrap.scrollLeft = savedScroll.left;
-                routersTableWrap.scrollTop = savedScroll.top;
-              });
-            }
-            showDeployStatus('Poll complete.', false);
-          }
-        ).catch(e => showDeployStatus('Poll failed: ' + e.message, true));
-      };
-      if (allSelected) {
-        showConfirmDelete('Poll all routers?', `Poll router info for all ${selected.length} router(s)?`, doPoll, '', 'Poll');
-      } else {
-        doPoll();
-      }
+      runPollRouters();
     });
   }
 
@@ -1499,7 +1994,7 @@
         .then(body => {
           if (body.error) showDeployStatus(body.error, true);
           else {
-            if (body.routers) state.routers = body.routers;
+            if (body.routers) state.routers = body.routers.map(sanitizeRouterColumnPaths);
             renderTable();
             if (state.deployType === 'sdk_apps' && body.log_file) {
               const n = body.failure_count ?? 0;
@@ -1563,19 +2058,24 @@
             .then(r => r.json())
             .then(body => {
               if (!body.error && body.routers) {
-                state.routers = body.routers;
+                state.routers = body.routers.map(sanitizeRouterColumnPaths);
+                if (body.columns && body.columns.length) state.columns = body.columns;
+                if (body.column_default_paths && typeof body.column_default_paths === 'object') state.columnDefaultPaths = { ...body.column_default_paths };
                 loadPingMonitoringFromStorage();
               }
               renderTable();
+              updateRouterFileLockUI();
             })
-            .catch(() => { renderTable(); });
+            .catch(() => { renderTable(); updateRouterFileLockUI(); });
         } else {
           renderTable();
+          updateRouterFileLockUI();
         }
         updateRoutersFilenameDisplay();
       })
       .catch(() => {
         renderTable();
+        updateRouterFileLockUI();
         updateRoutersFilenameDisplay();
       });
   }
@@ -1643,7 +2143,9 @@
             showDeployStatus(body.error, true);
             return;
           }
-          state.routers = body.routers || [];
+          state.routers = (body.routers || []).map(sanitizeRouterColumnPaths);
+          state.columns = body.columns && body.columns.length ? body.columns : [];
+          state.columnDefaultPaths = body.column_default_paths && typeof body.column_default_paths === 'object' ? { ...body.column_default_paths } : {};
           state.lastFile = filename;
           updateRoutersFilenameDisplay();
           renderTable();
@@ -1903,14 +2405,7 @@
         const s = state.pingSort;
         renderPingResults(state.pingResults, s.primary, s.primaryDir, s.secondary, s.secondaryDir);
         startOfflineDurationTick();
-        const savedScroll = routersTableWrap ? { left: routersTableWrap.scrollLeft, top: routersTableWrap.scrollTop } : null;
         renderTable();
-        if (savedScroll && routersTableWrap) {
-          requestAnimationFrame(() => {
-            routersTableWrap.scrollLeft = savedScroll.left;
-            routersTableWrap.scrollTop = savedScroll.top;
-          });
-        }
       })
       .catch(() => {})
       .finally(() => setPingButtonLoading(false));
@@ -1947,6 +2442,274 @@
   monitoringTabRemoteApi?.addEventListener('click', () => setMonitoringSubtab('remote-api'));
   monitoringTabBackup?.addEventListener('click', () => setMonitoringSubtab('backup'));
 
+  function computeSignalScore(rsrp, rsrq, sinr) {
+    const parseNum = (v) => { const n = parseFloat(v); return typeof n === 'number' && !isNaN(n) ? n : null; };
+    const r = parseNum(rsrp);
+    const q = parseNum(rsrq);
+    const s = parseNum(sinr);
+    const rsrpVal = r ?? -140;
+    const rsrqVal = q ?? -19.5;
+    const rsrpScore = Math.max(0, Math.min(100, (rsrpVal + 140) / 96 * 100));
+    const rsrqScore = Math.max(0, Math.min(100, (rsrqVal + 19.5) / 16.5 * 100));
+    let sinrScore = 0;
+    const sinrValid = s !== null;
+    if (sinrValid) sinrScore = Math.max(0, Math.min(100, (s + 20) / 45 * 100));
+    const combined = sinrValid ? 0.55 * sinrScore + 0.3 * rsrqScore + 0.15 * rsrpScore : (rsrpScore + rsrqScore) / 2;
+    return Math.round(Math.max(0, Math.min(100, combined)));
+  }
+
+  function escapeHtml(s) {
+    if (s == null) return '';
+    const div = document.createElement('div');
+    div.textContent = String(s);
+    return div.innerHTML;
+  }
+
+  function classifyWanDevices(devicesRaw) {
+    let devices = devicesRaw;
+    if (typeof devices === 'string') {
+      try { devices = JSON.parse(devices); } catch { return { ethernet: [], cellular: [], wwan: [] }; }
+    }
+    if (!devices || typeof devices !== 'object') return { ethernet: [], cellular: [], wwan: [] };
+    const result = { ethernet: [], cellular: [], wwan: [] };
+    for (const [deviceId, device] of Object.entries(devices)) {
+      if (!device || typeof device !== 'object') continue;
+      const uid = String(deviceId || '').toLowerCase();
+      if (uid.startsWith('ethernet')) {
+        result.ethernet.push({ deviceId, device });
+      } else if (uid.startsWith('mdm') || uid.startsWith('modems')) {
+        result.cellular.push({ deviceId, device });
+      } else if (uid.startsWith('wwan')) {
+        result.wwan.push({ deviceId, device });
+      }
+    }
+    return result;
+  }
+
+  function parseWanDevicesToCellularSimsForExpand(devicesRaw) {
+    let devices = devicesRaw;
+    if (typeof devices === 'string') {
+      try { devices = JSON.parse(devices); } catch { return []; }
+    }
+    if (!devices || typeof devices !== 'object') return [];
+    const sims = [];
+    for (const [deviceId, device] of Object.entries(devices)) {
+      const uid = deviceId.toLowerCase();
+      if ((!uid.startsWith('mdm') && !uid.startsWith('modems')) || !device || typeof device !== 'object') continue;
+      const status = device.status || {};
+      if (String(status.error_text || '').toUpperCase().includes('NOSIM')) continue;
+      if (String(status.connection_state || '').toLowerCase() !== 'connected') continue;
+      const info = device.info || {};
+      const diag = device.diagnostics || {};
+      const port = info.port;
+      const sim = info.sim;
+      const carrier = diag.CARRID;
+      const dbm = diag.DBM;
+      const sinr = diag.SINR;
+      const rsrp = diag.RSRP;
+      const rsrq = diag.RSRQ;
+      const rsrp5g = diag.RSRP_5G;
+      const rsrq5g = diag.RSRQ_5G;
+      const sinr5g = diag.SINR_5G;
+      const srvcType = String(diag.SRVC_TYPE || '').trim().toUpperCase();
+      const srvcTypeDetails = String(diag.SRVC_TYPE_DETAILS || '').trim();
+      let networkType;  // '4G' | '5G' | '4G/5G' (unknown)
+      if (srvcType === 'LTE') networkType = '4G';
+      else if (srvcType === '5G' || srvcType.includes('5G')) networkType = '5G';
+      else networkType = '4G/5G';
+      const has5g = rsrp5g != null && rsrq5g != null && sinr5g != null;
+      const score = has5g ? computeSignalScore(rsrp5g, rsrq5g, sinr5g) : computeSignalScore(rsrp, rsrq, sinr);
+      sims.push({
+        deviceId,
+        port,
+        sim,
+        carrier,
+        dbm,
+        rsrp,
+        rsrq,
+        sinr,
+        rsrp_5g: rsrp5g,
+        rsrq_5g: rsrq5g,
+        sinr_5g: sinr5g,
+        score,
+        networkType,
+        srvcTypeDetails,
+      });
+    }
+    return sims;
+  }
+
+  let routersRowExpansionInterval = null;
+
+  function stopRoutersRowExpansionInterval() {
+    if (routersRowExpansionInterval) {
+      clearInterval(routersRowExpansionInterval);
+      routersRowExpansionInterval = null;
+    }
+  }
+
+  function renderWanCardsInto(container, wanData, pingResult, offline) {
+    if (!container) return;
+    const c = classifyWanDevices(wanData || {});
+    const eth = c.ethernet || [];
+    const cellular = parseWanDevicesToCellularSimsForExpand(wanData || {});
+    const wwan = c.wwan || [];
+    const ethernetHtml = eth.map(({ device }) => {
+      const status = device.status || {};
+      const info = device.info || {};
+      const conn = String(status.connection_state || '').toLowerCase();
+      const connected = conn === 'connected';
+      const portName = info.port_name;
+      const label = typeof portName === 'string' ? portName : (portName && portName[0] != null ? String(portName[0]) : '');
+      const summary = status.summary != null ? String(status.summary) : '';
+      return `<div class="routers-wan-card routers-wan-ethernet">
+        <div class="routers-wan-card-title">Ethernet WAN</div>
+        <div class="routers-wan-ethernet-body">
+          <span class="routers-wan-icon ethernet-icon ${connected ? 'connected' : 'disconnected'}" title="${connected ? 'Connected' : 'Disconnected'}">&#x1F50C;</span>
+          <div class="routers-wan-card-content">
+            <div class="routers-wan-label">${escapeHtml(label || 'Ethernet')}</div>
+            <div class="routers-wan-summary">${escapeHtml(summary)}</div>
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+    const cellularHtml = cellular.map(sim => {
+      const meterColor = sim.score < 25 ? 'var(--signal-red)' : sim.score < 50 ? 'var(--signal-orange)' : sim.score < 75 ? 'var(--signal-yellow)' : 'var(--signal-green)';
+      const carrierLabel = sim.carrier ? escapeHtml(sim.carrier) : '—';
+      let headerLabel = `${carrierLabel} ${escapeHtml(sim.networkType)}`;
+      if (sim.networkType === '5G' && sim.srvcTypeDetails) {
+        headerLabel += ' ' + escapeHtml(sim.srvcTypeDetails);
+      }
+      const rawPort = sim.port || sim.deviceId || '';
+      const portDisplay = rawPort ? (String(rawPort).toLowerCase() === 'int1' ? 'Internal' : escapeHtml(String(rawPort))) : '';
+      const simSlot = sim.sim != null && sim.sim !== '' ? escapeHtml(String(sim.sim)) : '';
+      const simLine = [portDisplay, simSlot].filter(Boolean).join(' ');
+      const rssiStr = sim.dbm != null ? `RSSI ${sim.dbm} dBm` : '';
+      const sinrStr = sim.sinr != null ? `SINR ${sim.sinr} dB` : '';
+      const rsrpStr = sim.rsrp != null ? `RSRP ${sim.rsrp} dBm` : '';
+      const rsrqStr = sim.rsrq != null ? `RSRQ ${sim.rsrq} dB` : '';
+      const line1 = [rssiStr, sinrStr].filter(Boolean).join(' · ');
+      const line2 = [rsrpStr, rsrqStr].filter(Boolean).join(' · ');
+      const rsrp5gStr = sim.rsrp_5g != null ? `RSRP ${sim.rsrp_5g} dBm` : '';
+      const rsrq5gStr = sim.rsrq_5g != null ? `RSRQ ${sim.rsrq_5g} dB` : '';
+      const sinr5gStr = sim.sinr_5g != null ? `SINR ${sim.sinr_5g} dB` : '';
+      const line5g = sim.networkType === '5G' ? [rsrp5gStr, rsrq5gStr, sinr5gStr].filter(Boolean).join(' · ') : '';
+      const scoreLabel = sim.networkType === '4G' ? '4G Score' : sim.networkType === '5G' ? '5G Score' : '4G/5G Score';
+      const formulaTip = 'Score = 55% SINR + 30% RSRQ + 15% RSRP (if SINR available), else 50% RSRP + 50% RSRQ.';
+      return `<div class="routers-wan-card routers-wan-cellular">
+        <div class="routers-wan-cell-header">${headerLabel}</div>
+        <div class="routers-wan-meter-label">SIGNAL METER</div>
+        <div class="routers-wan-meter-wrap" title="${formulaTip}">
+          <div class="routers-wan-meter-bar" style="width: ${sim.score}%; background: ${meterColor};"></div>
+        </div>
+        <div class="routers-wan-score" title="${formulaTip}"><span class="routers-wan-score-label">${scoreLabel}:</span> ${sim.score}</div>
+        ${simLine ? `<div class="routers-wan-sim-line">${simLine}</div>` : ''}
+        <div class="routers-wan-cell-stats">
+          ${line1 ? `<span>${line1}</span>` : ''}
+          ${line2 ? `<span>${line2}</span>` : ''}
+          ${line5g ? `<span>${line5g}</span>` : ''}
+        </div>
+      </div>`;
+    }).join('');
+    const wifiHtml = wwan.map(({ device }) => {
+      const status = device.status || {};
+      const config = device.config || {};
+      const conn = String(status.connection_state || '').toLowerCase();
+      const connected = conn === 'connected';
+      const trigger = config.trigger_name != null ? String(config.trigger_name) : '';
+      const summary = status.summary != null ? String(status.summary) : '';
+      return `<div class="routers-wan-card routers-wan-wifi">
+        <div class="routers-wan-card-title">WiFi-as-WAN</div>
+        <div class="routers-wan-ethernet-body">
+          <span class="routers-wan-icon wifi-icon ${connected ? 'connected' : 'disconnected'}" title="${connected ? 'Connected' : 'Disconnected'}">&#x1F4F6;</span>
+          <div class="routers-wan-card-content">
+            <div class="routers-wan-label">${escapeHtml(trigger || 'WiFi-as-WAN')}</div>
+            <div class="routers-wan-summary">${escapeHtml(summary)}</div>
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+    const pingLoss = pingResult?.loss_pct != null ? pingResult.loss_pct + '%' : '—';
+    const pingMin = pingResult?.min_ms != null && pingResult.min_ms !== '' ? pingResult.min_ms + ' ms' : '—';
+    const pingAvg = pingResult?.avg_ms != null && pingResult.avg_ms !== '' ? pingResult.avg_ms + ' ms' : '—';
+    const pingMax = pingResult?.max_ms != null && pingResult.max_ms !== '' ? pingResult.max_ms + ' ms' : '—';
+    const pingHtml = `<div class="routers-wan-card routers-wan-ping">
+      <div class="routers-wan-card-title">Ping</div>
+      <dl class="routers-wan-stats">
+        <dt>Loss</dt><dd>${pingLoss}</dd>
+        <dt>Min</dt><dd>${pingMin}</dd>
+        <dt>Avg</dt><dd>${pingAvg}</dd>
+        <dt>Max</dt><dd>${pingMax}</dd>
+      </dl>
+    </div>`;
+    container.innerHTML = `
+      <div class="routers-wan-sections">
+        ${eth.length ? `<div class="routers-wan-section"><div class="routers-wan-cards">${ethernetHtml}</div></div>` : ''}
+        ${cellular.length ? `<div class="routers-wan-section"><div class="routers-wan-cards">${cellularHtml}</div></div>` : ''}
+        ${wwan.length ? `<div class="routers-wan-section"><div class="routers-wan-cards">${wifiHtml}</div></div>` : ''}
+        <div class="routers-wan-section"><div class="routers-wan-cards">${pingHtml}</div></div>
+      </div>`;
+  }
+
+  function runRoutersRowExpansionTick(routerIndex) {
+    if (state.routersRowExpanded === null || state.routersRowExpanded !== routerIndex) return;
+    const router = state.routers[routerIndex];
+    const ip = (router?.ip_address || '').split(':')[0] || '';
+    if (!ip) return;
+    const expansionRow = routersBody?.querySelector(`.routers-expanded-row[data-state-row="${routerIndex}"]`);
+    if (!expansionRow) return;
+    const container = expansionRow.querySelector('.routers-wan-cards-wrap');
+    if (!container) return;
+    if (!container.querySelector('.routers-wan-sections')) container.innerHTML = '<div class="routers-wan-loading">Loading...</div>';
+    fetch('/api/routers/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ routers: state.routers }),
+    })
+      .then(() =>
+        fetch('/api/monitoring/signal-strength', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ index: routerIndex }),
+        }).then(r => r.json())
+      )
+      .then((wanRes) => {
+        if (state.routersRowExpanded !== routerIndex) return;
+        const wanOk = wanRes && wanRes.ok && wanRes.data;
+        if (wanOk) {
+          state.routerWanData[routerIndex] = wanRes.data;
+          updatePathColumnCells(routerIndex);
+        }
+        const currentPing = (state.pingResults || []).find(p => (p.ip || '').split(':')[0] === ip) || null;
+        renderWanCardsInto(container, wanOk ? wanRes.data : null, currentPing, !wanOk);
+        requestAnimationFrame(() => syncSelectTableHeights());
+      })
+      .catch(() => {
+        if (state.routersRowExpanded === routerIndex && container) {
+          renderWanCardsInto(container, null, null, true);
+          requestAnimationFrame(() => syncSelectTableHeights());
+        }
+      });
+  }
+
+  function handleRoutersRowExpandClick(stateRowIdx) {
+    if (!state.routerFileLocked) return;
+    if (state.routersRowExpanded === stateRowIdx) {
+      state.routersRowExpanded = null;
+      stopRoutersRowExpansionInterval();
+      renderTable();
+      return;
+    }
+    if (state.routersRowExpanded != null) {
+      state.routersRowExpanded = null;
+      stopRoutersRowExpansionInterval();
+    }
+    state.routersRowExpanded = stateRowIdx;
+    renderTable();
+    runRoutersRowExpansionTick(stateRowIdx);
+    routersRowExpansionInterval = setInterval(() => runRoutersRowExpansionTick(stateRowIdx), 3000);
+  }
+
   // Router API
   const remoteApiMethod = $('#remoteApiMethod');
   const remoteApiPaths = $('#remoteApiPaths');
@@ -1982,6 +2745,17 @@
     btnRemoteApiPut.style.display = m === 'PUT' ? 'block' : 'none';
     btnRemoteApiPost.style.display = m === 'POST' ? 'block' : 'none';
     btnRemoteApiDelete.style.display = m === 'DELETE' ? 'block' : 'none';
+    updateRemoteApiButtonState();
+  }
+
+  function updateRemoteApiButtonState() {
+    const selected = [...state.routersRowSelected].filter(i => i >= 0 && i < state.routers.length);
+    const disabled = selected.length === 0;
+    const btn = getRemoteApiMethodButton();
+    if (btn) {
+      btn.disabled = disabled;
+      btn.title = disabled ? 'Select routers' : '';
+    }
   }
   remoteApiMethod?.addEventListener('change', updateRemoteApiFormVisibility);
   updateRemoteApiFormVisibility();
@@ -1994,7 +2768,11 @@
   function setRemoteApiButtonLoading(loading) {
     const btn = getRemoteApiMethodButton();
     if (!btn) return;
-    btn.disabled = loading;
+    if (loading) {
+      btn.disabled = true;
+    } else {
+      updateRemoteApiButtonState();
+    }
     const label = btn.dataset.originalText || btn.textContent;
     if (loading) {
       btn.innerHTML = '<span class="btn-spinner"></span> ' + label + 'ing...';
@@ -2157,20 +2935,49 @@
       showDeployStatus?.('Load routers file first.', true);
       return;
     }
+    const selected = [...state.routersRowSelected].filter(i => i >= 0 && i < state.routers.length);
+    if (!selected.length) {
+      showDeployStatus?.('Select routers to copy to.', true);
+      return;
+    }
     const ipToValue = {};
     apiRows.forEach(row => {
       const ip = String(row[0] ?? '').trim().split(':')[0];
       if (ip) ipToValue[ip] = row[stateRemoteApiSelectedCol] ?? '';
     });
-    const newColName = apiHeaders[stateRemoteApiSelectedCol];
-    state.routers.forEach(r => {
+    const headerRaw = apiHeaders[stateRemoteApiSelectedCol];
+    const key = normalizeColumnName(headerRaw) || 'column';
+    const pathLike = /[./[]/.test(headerRaw);
+    if (!state.columns.length) state.columns = [...DEFAULT_COLUMNS];
+    if (!state.columns.some(c => normalizeColumnName(c) === key)) {
+      state.columns.push(headerRaw);
+    }
+    if (pathLike) state.columnDefaultPaths[key] = toDotBracketPath(headerRaw);
+    let rows = [...state.routers];
+    const p = state.routersSort.primary;
+    const s = state.routersSort.secondary;
+    if (p) {
+      rows.sort((a, b) => {
+        const cmp = state.routersSort.primaryDir * routersCompareVal(p, a, b);
+        if (cmp !== 0) return cmp;
+        if (s) return state.routersSort.secondaryDir * routersCompareVal(s, a, b);
+        return 0;
+      });
+    }
+    selected.forEach(idx => {
+      const r = rows[idx];
+      if (!r) return;
       const ip = String(r.ip_address ?? '').trim().split(':')[0];
-      r[newColName] = ipToValue[ip] ?? '';
+      r[key] = ipToValue[ip] ?? '';
     });
     fetch('/api/routers/update', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ routers: state.routers }),
+      body: JSON.stringify({
+        routers: state.routers,
+        columns: state.columns,
+        column_default_paths: state.columnDefaultPaths,
+      }),
     })
       .then(r => r.json())
       .then(body => {
@@ -2179,7 +2986,7 @@
           return;
         }
         renderTable();
-        showDeployStatus?.('Column "' + newColName + '" copied to routers.', false);
+        showDeployStatus?.('Column "' + (headerRaw || key) + '" copied to ' + selected.length + ' router(s).', false);
       })
       .catch(e => showDeployStatus?.('Copy failed: ' + e.message, true));
   });
@@ -2244,7 +3051,9 @@
       let drawerTab = 'deployment';
       if (drawerTabMonitoring?.classList.contains('active')) drawerTab = 'monitoring';
       else if (drawerTabLogs?.classList.contains('active')) drawerTab = 'logs';
+      const drawerExpanded = drawer?.classList.contains('expanded');
       localStorage.setItem(DRAWER_UI_KEY, JSON.stringify({
+        drawerExpanded,
         drawerTab,
         pingAuto: pingAuto?.checked ?? false,
         pingInterval: parseInt(pingInterval?.value, 10) || 30,
@@ -2253,6 +3062,9 @@
         pollAuto: pollAuto?.checked ?? false,
         pollIntervalMinutes: parseInt(pollIntervalMinutes?.value, 10) || 60,
         routerFileLocked: state.routerFileLocked,
+        columnDefaultPaths: state.columnDefaultPaths,
+        columnDisplayNames: state.columnDisplayNames,
+        routersColumnWidths: state.routersColumnWidths,
       }));
     } catch (_) {}
   }
@@ -2279,6 +3091,9 @@
         if (pollAuto && typeof ui.pollAuto === 'boolean') pollAuto.checked = ui.pollAuto;
         if (pollIntervalMinutes && ui.pollIntervalMinutes) pollIntervalMinutes.value = Math.max(1, ui.pollIntervalMinutes);
         if (typeof ui.routerFileLocked === 'boolean') state.routerFileLocked = ui.routerFileLocked;
+        if (ui.columnDefaultPaths && typeof ui.columnDefaultPaths === 'object') state.columnDefaultPaths = { ...state.columnDefaultPaths, ...ui.columnDefaultPaths };
+        if (ui.columnDisplayNames && typeof ui.columnDisplayNames === 'object') state.columnDisplayNames = { ...state.columnDisplayNames, ...ui.columnDisplayNames };
+        if (ui.routersColumnWidths && typeof ui.routersColumnWidths === 'object') state.routersColumnWidths = { ...state.routersColumnWidths, ...ui.routersColumnWidths };
         if (pingAuto?.checked) {
           const sec = parseInt(pingInterval?.value, 10) || 30;
           pingAutoTimer = setInterval(() => runPing(), Math.max(5, sec) * 1000);
@@ -2328,6 +3143,62 @@
     const th = e.target.closest('th.routers-sortable');
     if (th?.dataset.field && !e.target.closest('.btn-icon') && !e.target.closest('.btn-col-delete')) setRoutersSort(th.dataset.field);
   });
+
+  (function setupColumnDrag() {
+    if (!routersTable) return;
+    let dragFromIdx = -1;
+    let lastDropTime = 0;
+    routersTable.addEventListener('dragstart', (e) => {
+      if (state.routerFileLocked) return;
+      const th = e.target.closest('th.col-draggable');
+      if (!th) return;
+      const fields = getVisibleFields();
+      const cellIndex = th.cellIndex;
+      const fieldIdx = cellIndex - 1;  // skip state(0)
+      if (fieldIdx < 0 || fieldIdx >= fields.length) return;
+      dragFromIdx = fieldIdx;
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', String(fieldIdx));
+      th.classList.add('col-dragging');
+    });
+    routersTable.addEventListener('dragend', (e) => {
+      e.target.closest('th')?.classList.remove('col-dragging');
+      document.querySelectorAll('th.col-drag-over').forEach(el => el.classList.remove('col-drag-over'));
+      dragFromIdx = -1;
+    });
+    routersTable.addEventListener('dragover', (e) => {
+      if (state.routerFileLocked || dragFromIdx < 0) return;
+      const th = e.target.closest('th.col-draggable');
+      if (!th) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      document.querySelectorAll('th.col-drag-over').forEach(el => el.classList.remove('col-drag-over'));
+      th.classList.add('col-drag-over');
+    });
+    routersTable.addEventListener('dragleave', (e) => {
+      if (!e.relatedTarget || !routersTable.contains(e.relatedTarget)) {
+        e.target.closest('th')?.classList.remove('col-drag-over');
+      }
+    });
+    routersTable.addEventListener('drop', (e) => {
+      e.preventDefault();
+      if (state.routerFileLocked || dragFromIdx < 0) return;
+      const th = e.target.closest('th.col-draggable');
+      if (!th) return;
+      const fields = getVisibleFields();
+      const cellIndex = th.cellIndex;
+      const toIdx = cellIndex - 1;
+      if (toIdx >= 0 && toIdx < fields.length) {
+        reorderColumns(dragFromIdx, toIdx);
+        lastDropTime = Date.now();
+      }
+      th.classList.remove('col-drag-over');
+      dragFromIdx = -1;
+    });
+    routersTable.addEventListener('click', (e) => {
+      if (Date.now() - lastDropTime < 200 && e.target.closest('th.routers-sortable')) e.stopPropagation();
+    }, true);
+  })();
 
   routersUpload?.addEventListener('change', uploadRouters);
   btnDownload?.addEventListener('click', downloadRouters);

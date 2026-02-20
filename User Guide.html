@@ -55,7 +55,7 @@
         <li><a href="#sdk-apps">3.4 SDK Apps</a></li>
       </ul>
     </li>
-    <li><a href="#monitoring-tab">4. Monitoring Tab</a>
+        <li><a href="#monitoring-tab">4. Monitoring Tab</a>
       <ul>
         <li><a href="#ping">4.1 Ping</a></li>
         <li><a href="#router-api">4.2 Router API</a></li>
@@ -220,6 +220,8 @@
 
 <p>Results are sortable and paginated. Ping results and Auto state persist across refreshes. When ping updates router status, the routers table scroll position is preserved.</p>
 
+<p>Cellular signal strength is shown in the expanded router row when the file is locked. Lock the file and click a row to expand and see Ethernet WAN, Cellular WAN, WiFi-as-WAN, and Ping cards with signal metrics.</p>
+
 <h3 id="router-api">4.2 Router API</h3>
 
 <p>Make calls to the router API across multiple routers at once. Runs on <strong>selected</strong> routers only. Select one or more routers, then run GET, PUT, POST, or DELETE. If all routers are selected, a confirmation dialog appears.</p>
@@ -228,7 +230,7 @@
 
 <ul>
   <li><strong>Method</strong> — GET, PUT, POST, or DELETE.</li>
-  <li><strong>GET</strong> — Enter API paths (comma or space separated). Paths are prefixed with <code>/api/</code> (e.g. <code>status/gps</code> → <code>/api/status/gps</code>). Use <code>*</code> in paths for wildcard expansion (e.g. <code>status/wan/devices/mdm*/diagnostics</code>). Results show one column per path.</li>
+  <li><strong>GET</strong> — Enter API paths in dot.bracket format (e.g. <code>status.wan.devices[0].diagnostics</code>, <code>config.system.system_id</code>). Use <code>*</code> for wildcards (e.g. <code>status.wan.devices[mdm*].diagnostics</code>). Use <code>[{path}]</code> for variables: the inner path is fetched first and its value substituted (e.g. <code>status.wan.devices[{status.wan.primary_device}].stats</code>). Slash paths are supported for backwards compatibility. Results show one column per path.</li>
   <li><strong>PUT/POST</strong> — Enter path and JSON payload.</li>
   <li><strong>DELETE</strong> — Enter path.</li>
 </ul>

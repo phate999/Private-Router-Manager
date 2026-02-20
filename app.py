@@ -39,8 +39,22 @@ requests.packages.urllib3.disable_warnings()
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 
-# Router schema: state, ip_address, hostname, mac, serial_number, product_name, ncos_version, username, password, port, created_at
-ROUTER_KEYS = ["state", "ip_address", "hostname", "mac", "serial_number", "product_name", "ncos_version", "username", "password", "port", "created_at"]
+# Router schema: state, ip_address, hostname, description, mac, serial_number, asset_id, product_name, ncos_version, username, password, port, created_at
+ROUTER_KEYS = ["state", "ip_address", "hostname", "description", "mac", "serial_number", "asset_id", "product_name", "ncos_version", "username", "password", "port", "created_at"]
+
+DEFAULT_COLUMNS = [
+    "State", "IP Address", "Hostname", "Description", "MAC", "Serial Number", "Asset ID",
+    "Product Name", "NCOS Version", "Username", "Password", "Port", "Created At",
+]
+COLUMN_DEFAULT_PATHS = {
+    "hostname": "config.system.system_id",
+    "mac": "status.product_info.mac0",
+    "serial_number": "status.product_info.manufacturing.serial_num",
+    "product_name": "status.product_info.product_name",
+    "ncos_version": "status.fw_info",
+    "description": "config.system.desc",
+    "asset_id": "config.system.asset_id",
+}
 
 # In-memory routers store (list of router dicts)
 routers_data = []
@@ -86,8 +100,10 @@ def _empty_router():
         "state": "Online",
         "ip_address": "",
         "hostname": "",
+        "description": "",
         "mac": "",
         "serial_number": "",
+        "asset_id": "",
         "product_name": "",
         "ncos_version": "",
         "username": "admin",
@@ -492,55 +508,6 @@ def _normalize_router(r):
     return out
 
 
-def _csv_to_routers(content):
-    """Convert legacy CSV content to list of router dicts (for migration)."""
-    reader = csv.reader(io.StringIO(content))
-    rows = list(reader)
-    if not rows:
-        return []
-    headers = [str(h).strip().lower().replace(" ", "_") for h in rows[0]]
-    aliases = {
-        "ip_address": ["ip_address", "ipaddress", "ip"],
-        "hostname": ["hostname"],
-        "mac": ["mac", "mac_address"],
-        "serial_number": ["serial", "serial_number"],
-        "product_name": ["product", "product_name"],
-        "ncos_version": ["ncos", "ncos_version"],
-        "username": ["username", "user"],
-        "password": ["password", "pass"],
-        "port": ["port"],
-    }
-    col_map = {}
-    for k, aliases_list in aliases.items():
-        for i, h in enumerate(headers):
-            if any(a in h for a in aliases_list):
-                col_map[k] = i
-                break
-    if "ip_address" not in col_map:
-        for i, h in enumerate(headers):
-            if "ip" in h:
-                col_map["ip_address"] = i
-                break
-    if "ip_address" not in col_map:
-        return []
-    routers = []
-    for row in rows[1:]:
-        r = _empty_router()
-        for k, idx in col_map.items():
-            if idx < len(row):
-                v = row[idx]
-                if k == "port":
-                    try:
-                        r[k] = int(v) if v else 8080
-                    except (ValueError, TypeError):
-                        r[k] = 8080
-                else:
-                    r[k] = str(v or "").strip()
-        if r["ip_address"]:
-            routers.append(r)
-    return routers
-
-
 @app.route("/api/routers/list")
 def routers_list():
     """List JSON router files in the routers folder."""
@@ -555,49 +522,34 @@ def routers_list():
 
 @app.route("/api/routers/open")
 def routers_open():
-    """Load a routers JSON file (or migrate from legacy CSV)."""
+    """Load a routers JSON file (columns, column_default_paths, routers)."""
     filename = request.args.get("filename", "").strip()
     if not filename:
         return jsonify({"error": "Invalid filename"}), 400
-    if filename.lower().endswith(".csv"):
-        filepath = APP_ROOT / "csv" / filename
-        if not filepath.exists():
-            filepath = ROUTERS_DIR / filename.replace(".csv", ".json")
-    else:
-        if not filename.lower().endswith(".json"):
-            filename += ".json"
-        filepath = ROUTERS_DIR / filename
-        if not filepath.exists() and filename == "routers.json":
-            old_csv = APP_ROOT / "csv" / "routers.csv"
-            if old_csv.exists():
-                try:
-                    content = old_csv.read_text(encoding="utf-8-sig", errors="replace")
-                    migrated = _csv_to_routers(content)
-                    if migrated:
-                        ROUTERS_DIR.mkdir(parents=True, exist_ok=True)
-                        with open(filepath, "w", encoding="utf-8") as f:
-                            json.dump({"routers": [_normalize_router(r) for r in migrated]}, f, indent=2)
-                except (IOError, json.JSONDecodeError):
-                    pass
+    if not filename.lower().endswith(".json"):
+        filename += ".json"
+    filepath = ROUTERS_DIR / filename
     if not filepath.exists() or not filepath.is_file():
         return jsonify({"error": "File not found"}), 404
     try:
-        content = filepath.read_text(encoding="utf-8-sig", errors="replace")
-    except IOError as e:
-        return jsonify({"error": str(e)}), 500
-    if filepath.suffix.lower() == ".csv":
-        routers = _csv_to_routers(content)
-    else:
-        try:
-            data = json.loads(content)
-            raw = data.get("routers", data) if isinstance(data, dict) else data
-            routers = [_normalize_router(r) for r in raw] if isinstance(raw, list) else []
-        except json.JSONDecodeError:
-            return jsonify({"error": "Invalid JSON"}), 400
+        data = json.loads(filepath.read_text(encoding="utf-8-sig", errors="replace"))
+    except (IOError, json.JSONDecodeError) as e:
+        return jsonify({"error": str(e) if isinstance(e, IOError) else "Invalid JSON"}), 400
+    raw = data.get("routers", []) if isinstance(data, dict) else []
+    routers = [_normalize_router(r) for r in raw] if isinstance(raw, list) else []
+    columns = data.get("columns", DEFAULT_COLUMNS) if isinstance(data, dict) else DEFAULT_COLUMNS
+    column_default_paths = data.get("column_default_paths", {}) if isinstance(data, dict) else {}
+    if not columns:
+        columns = DEFAULT_COLUMNS
+    if not isinstance(column_default_paths, dict):
+        column_default_paths = {}
     routers_data.clear()
     routers_data.extend(routers)
     page, per_page = _parse_pagination_args(request.args)
-    return jsonify(_paginate_routers_response(list(routers_data), page, per_page))
+    out = _paginate_routers_response(list(routers_data), page, per_page)
+    out["columns"] = columns
+    out["column_default_paths"] = column_default_paths
+    return jsonify(out)
 
 
 @app.route("/api/routers/upload", methods=["POST"])
@@ -607,26 +559,30 @@ def routers_upload():
     f = request.files["file"]
     if not f.filename:
         return jsonify({"error": "No filename"}), 400
-    fn_lower = f.filename.lower()
-    content = f.read().decode("utf-8-sig", errors="replace")
-    if fn_lower.endswith(".csv"):
-        routers = _csv_to_routers(content)
-    elif fn_lower.endswith(".json"):
-        try:
-            data = json.loads(content)
-            raw = data.get("routers", data) if isinstance(data, dict) else data
-            routers = [_normalize_router(r) for r in raw] if isinstance(raw, list) else []
-        except json.JSONDecodeError:
-            return jsonify({"error": "Invalid JSON"}), 400
-    else:
-        return jsonify({"error": "File must be .json or .csv"}), 400
+    if not f.filename.lower().endswith(".json"):
+        return jsonify({"error": "File must be .json"}), 400
+    try:
+        data = json.loads(f.read().decode("utf-8-sig", errors="replace"))
+    except json.JSONDecodeError:
+        return jsonify({"error": "Invalid JSON"}), 400
+    raw = data.get("routers", []) if isinstance(data, dict) else []
+    routers = [_normalize_router(r) for r in raw] if isinstance(raw, list) else []
+    columns = data.get("columns", DEFAULT_COLUMNS) if isinstance(data, dict) else DEFAULT_COLUMNS
+    column_default_paths = data.get("column_default_paths", {}) if isinstance(data, dict) else {}
+    if not columns:
+        columns = DEFAULT_COLUMNS
+    if not isinstance(column_default_paths, dict):
+        column_default_paths = {}
     if not routers:
         return jsonify({"error": "No valid router data"}), 400
     routers_data.clear()
     routers_data.extend(routers)
     data_src = request.form if request.form else (request.get_json(silent=True) or {})
     page, per_page = _parse_pagination_args(data_src)
-    return jsonify(_paginate_routers_response(list(routers_data), page, per_page))
+    out = _paginate_routers_response(list(routers_data), page, per_page)
+    out["columns"] = columns
+    out["column_default_paths"] = column_default_paths
+    return jsonify(out)
 
 
 @app.route("/api/routers/download")
@@ -667,16 +623,24 @@ def routers_save():
     normalized = [_normalize_router(r) for r in routers]
     routers_data.clear()
     routers_data.extend(normalized)
+    columns = data.get("columns", DEFAULT_COLUMNS)
+    column_default_paths = data.get("column_default_paths", {})
+    if not isinstance(column_default_paths, dict):
+        column_default_paths = {}
     filepath = ROUTERS_DIR / filename
     ensure_folders()
     with open(filepath, "w", encoding="utf-8") as f:
-        json.dump({"routers": normalized}, f, indent=2)
+        json.dump({
+            "columns": columns,
+            "column_default_paths": column_default_paths,
+            "routers": normalized,
+        }, f, indent=2)
     return jsonify({"saved": str(filepath)})
 
 
 @app.route("/api/routers/update", methods=["POST"])
 def routers_update():
-    """Update in-memory routers from editor."""
+    """Update in-memory routers from editor. Optionally accepts columns and column_default_paths to persist."""
     data = request.get_json() or {}
     routers = data.get("routers", [])
     if not routers:
@@ -684,6 +648,27 @@ def routers_update():
     normalized = [_normalize_router(r) for r in routers]
     routers_data.clear()
     routers_data.extend(normalized)
+    columns = data.get("columns")
+    column_default_paths = data.get("column_default_paths")
+    if columns is not None or column_default_paths is not None:
+        ensure_folders()
+        filepath = _get_routers_filepath()
+        if filepath and routers_data:
+            try:
+                existing = {}
+                if filepath.exists():
+                    try:
+                        with open(filepath, encoding="utf-8") as f:
+                            existing = json.load(f)
+                    except (json.JSONDecodeError, IOError):
+                        pass
+                payload = {"routers": [_normalize_router(r) for r in routers_data]}
+                payload["columns"] = columns if columns is not None else existing.get("columns", DEFAULT_COLUMNS)
+                payload["column_default_paths"] = column_default_paths if isinstance(column_default_paths, dict) else (existing.get("column_default_paths") or dict(COLUMN_DEFAULT_PATHS))
+                with open(filepath, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, indent=2)
+            except IOError:
+                pass
     return jsonify({"ok": True})
 
 
@@ -991,8 +976,7 @@ def api_ping():
             filename += ".json"
         filepath = ROUTERS_DIR / filename
         try:
-            with open(filepath, "w", encoding="utf-8") as f:
-                json.dump({"routers": [_normalize_router(r) for r in routers_data]}, f, indent=2)
+            _persist_routers_file(filepath)
         except IOError:
             pass
     page, per_page = _parse_pagination_args(data)
@@ -1118,6 +1102,110 @@ def _get_item_identifier(item):
     return None
 
 
+def _to_slash_path(path):
+    """Convert dot.bracket or slash.bracket path to slash format for the router API.
+    E.g. status.wan.devices[0].diagnostics -> status/wan/devices/0/diagnostics
+    E.g. status/lan/[0] -> status/lan/0
+    E.g. status.lan.[0] -> status/lan/0
+    Supports status.wan.devices[mdm0].stats, status.wan.devices[*].diagnostics, etc."""
+    if not path or not isinstance(path, str):
+        return path
+    s = path.strip()
+    if not s:
+        return s
+    # If already slash-only (no dots, no brackets) - pass through
+    if "/" in s and "." not in s and "[" not in s:
+        return s
+    segments = []
+    i = 0
+    while i < len(s):
+        if s[i] in "./":
+            i += 1
+            continue
+        if s[i] == "[":
+            j = s.find("]", i)
+            if j == -1:
+                return s
+            segments.append(s[i + 1 : j].strip())
+            i = j + 1
+            continue
+        start = i
+        while i < len(s) and s[i] not in "./[]":
+            i += 1
+        name = s[start:i].strip()
+        if name:
+            segments.append(name)
+        if i < len(s) and s[i] == "[":
+            j = s.find("]", i)
+            if j != -1:
+                segments.append(s[i + 1 : j].strip())
+                i = j + 1
+    return "/".join(str(seg) for seg in segments) if segments else s
+
+
+def _resolve_path_variables(path, ip, port, username, password, timeout=15):
+    """Resolve {var_path} in path by fetching var_path from the router and substituting.
+    Path can be dot.bracket (status.wan.devices[{status.wan.primary_device}].stats) or slash.
+    Variable paths use dot.bracket. Returns (resolved_slash_path, error_msg)."""
+    if "{" not in path:
+        return _to_slash_path(path) if path else path, None
+    result = path
+    while "{" in result:
+        m = re.search(r"\{([^{}]+)\}", result)
+        if not m:
+            return None, "Unmatched { in path"
+        var_path = m.group(1).strip()
+        if not var_path:
+            return None, "Empty variable in path"
+        api_var_path = _to_slash_path(var_path)
+        success, data_or_err = _call_router_api(ip, port, username, password, "GET", api_var_path, timeout=timeout)
+        if not success:
+            return None, f"Variable {{{var_path}}}: {data_or_err}"
+        val = data_or_err
+        if isinstance(val, (dict, list)):
+            # Try traversing the path: e.g. status.wan.primary_device -> get obj["status"]["wan"]["primary_device"]
+            parts = [x.strip() for x in re.split(r"\.|/", var_path) if x.strip()]
+            cur = val
+            for part in parts:
+                if cur is None:
+                    break
+                if isinstance(cur, dict):
+                    nxt = cur.get(part)
+                    if nxt is None:
+                        for k, v in cur.items():
+                            if str(k).lower() == part.lower():
+                                nxt = v
+                                break
+                    cur = nxt
+                elif isinstance(cur, list) and part.isdigit():
+                    i = int(part)
+                    cur = cur[i] if 0 <= i < len(cur) else None
+                else:
+                    cur = None
+            if cur is not None and isinstance(cur, (str, int, float, bool)):
+                val = cur
+            elif cur is not None and parts:
+                # Fallback: fetch parent path and traverse; e.g. status/wan if status/wan/primary_device returned object
+                parent_path = "/".join(api_var_path.split("/")[:-1])
+                if parent_path:
+                    success2, data2 = _call_router_api(ip, port, username, password, "GET", parent_path, timeout=timeout)
+                    if success2 and isinstance(data2, dict):
+                        leaf = api_var_path.split("/")[-1]
+                        cur = data2.get(leaf)
+                        if cur is None:
+                            for k, v in data2.items():
+                                if str(k).lower() == leaf.lower():
+                                    cur = v
+                                    break
+                        if cur is not None and isinstance(cur, (str, int, float, bool)):
+                            val = cur
+            if not isinstance(val, (str, int, float, bool)):
+                return None, f"Variable {{{var_path}}} must return a scalar (got {type(val).__name__})"
+        subst = str(val) if val is not None else ""
+        result = result[: m.start()] + subst + result[m.end() :]
+    return _to_slash_path(result), None
+
+
 def _expand_path_wildcard(obj, base_path, segments):
     """Post-call: expand * or pattern (e.g. mdm*) in path by traversing JSON. Returns [(full_path, value), ...].
     e.g. status/devices/*/signal -> each child's signal; status/devices/mdm*/diagnostics -> keys matching mdm*."""
@@ -1160,16 +1248,18 @@ def _expand_path_wildcard(obj, base_path, segments):
         return []
 
 
-def _call_router_api(ip, port, username, password, method, path, payload=None):
+def _call_router_api(ip, port, username, password, method, path, payload=None, timeout=None):
     """Call router API at /api/{path}. Returns (success, data_or_error).
     Cradlepoint API expects application/x-www-form-urlencoded with body: data=<urlencoded-json>"""
+    if timeout is None:
+        timeout = 15
     base = f"http://{ip}:{port}" if ":" not in str(ip) else f"http://{ip}"
     url = f"{base}/api/{path.lstrip('/')}"
     auth = (username, password)
     connection_started()
     try:
         if method == "GET":
-            r = requests.get(url, auth=auth, verify=False, timeout=15)
+            r = requests.get(url, auth=auth, verify=False, timeout=timeout)
         elif method in ("PUT", "POST"):
             # Cradlepoint expects form-urlencoded with data=json (see test.har)
             payload_data = payload if payload is not None else {}
@@ -1177,11 +1267,11 @@ def _call_router_api(ip, port, username, password, method, path, payload=None):
             body = {"data": data_str}
             headers = {"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"}
             if method == "PUT":
-                r = requests.put(url, data=body, auth=auth, verify=False, timeout=15, headers=headers)
+                r = requests.put(url, data=body, auth=auth, verify=False, timeout=timeout, headers=headers)
             else:
-                r = requests.post(url, data=body, auth=auth, verify=False, timeout=15, headers=headers)
+                r = requests.post(url, data=body, auth=auth, verify=False, timeout=timeout, headers=headers)
         elif method == "DELETE":
-            r = requests.delete(url, auth=auth, verify=False, timeout=15)
+            r = requests.delete(url, auth=auth, verify=False, timeout=timeout)
         else:
             connection_finished()
             request_completed(success=False)
@@ -1221,6 +1311,38 @@ def _call_router_api(ip, port, username, password, method, path, payload=None):
         return False, _format_connection_error(e)
 
 
+@app.route("/api/monitoring/signal-strength", methods=["POST"])
+def api_signal_strength():
+    """Dedicated endpoint for signal strength monitoring. Uses connection_timeout for fast failure detection.
+    Returns {ok: true, data: {...}} or {ok: false, error: "..."}."""
+    data = request.get_json() or {}
+    if not routers_data:
+        return jsonify({"ok": False, "error": "No router data. Load a routers file first."})
+    try:
+        idx = int(data.get("index", data.get("indices", [None])[0] if data.get("indices") else -1))
+    except (TypeError, ValueError, IndexError):
+        idx = -1
+    if idx < 0 or idx >= len(routers_data):
+        return jsonify({"ok": False, "error": "Select exactly one router."})
+    r = routers_data[idx]
+    ip = str(r.get("ip_address", "")).strip()
+    if not ip:
+        return jsonify({"ok": False, "error": "Router has no IP."})
+    if ":" in ip:
+        ip = ip.split(":")[0]
+    port = int(r.get("port", 8080)) if r.get("port") else 8080
+    username = str(r.get("username", "")).strip() or "admin"
+    password = str(r.get("password", "")).strip()
+    if not password:
+        return jsonify({"ok": False, "error": "Router has no password."})
+    cfg = _load_app_config()
+    timeout = max(1, min(60, int(cfg.get("connection_timeout", 2))))
+    success, data_or_err = _call_router_api(ip, port, username, password, "GET", "status/wan/devices", timeout=timeout)
+    if not success:
+        return jsonify({"ok": False, "error": str(data_or_err)})
+    return jsonify({"ok": True, "data": data_or_err})
+
+
 @app.route("/api/monitoring/remote-api", methods=["POST"])
 def api_remote_api():
     """Call router API endpoints. Returns results per router."""
@@ -1245,6 +1367,9 @@ def api_remote_api():
         if not path:
             return jsonify({"error": "Enter path"}), 400
         paths = [path]
+    # Paths stay as user-entered (dot.bracket or slash). Conversion to slash happens in
+    # _resolve_path_variables (after resolving {var}) or for simple_async below.
+    if method in ("PUT", "POST"):
         payload = None
         try:
             payload_str = (data.get("payload") or "").strip()
@@ -1252,6 +1377,8 @@ def api_remote_api():
                 payload = json.loads(payload_str)
         except json.JSONDecodeError:
             return jsonify({"error": "Invalid JSON payload"}), 400
+    else:
+        payload = None
 
     raw_indices = data.get("indices", [])
     if not raw_indices:
@@ -1292,7 +1419,8 @@ def api_remote_api():
     except ImportError:
         use_async = False
 
-    simple_async = use_async and (
+    has_vars = any("{" in p and "}" in p for p in paths)
+    simple_async = use_async and not has_vars and (
         method in ("PUT", "POST", "DELETE") or
         (method == "GET" and len(paths) == 1 and "*" not in paths[0])
     )
@@ -1300,7 +1428,7 @@ def api_remote_api():
     if simple_async:
         api_targets = [(t["ip"], t["port"], t["username"], t["password"]) for t in targets]
         max_concurrent = _get_max_workers(len(targets), "remote_api")
-        path_to_call = paths[0] if method == "GET" else paths[0]
+        path_to_call = _to_slash_path(paths[0]) if ("." in paths[0] or "[" in paths[0]) else paths[0]
         payload_to_use = None
         if method in ("PUT", "POST"):
             try:
@@ -1343,10 +1471,20 @@ def api_remote_api():
             if method == "GET":
                 row_data = {"ip": t["ip"], "hostname": t["hostname"] or "-"}
                 for p in paths:
-                    has_wildcard = "*" in p
-                    api_path = p  # default: use path as-is
+                    resolved, var_err = _resolve_path_variables(
+                        p, t["ip"], t["port"], t["username"], t["password"]
+                    )
+                    if var_err:
+                        row_data[p] = f"Failed: {var_err}"
+                        continue
+                    if resolved and "{" in resolved:
+                        row_data[p] = "Failed: Variable could not be resolved"
+                        continue
+                    work_path = resolved
+                    has_wildcard = "*" in work_path
+                    api_path = work_path  # default: use path as-is
                     if has_wildcard:
-                        path_segments = p.split("/")
+                        path_segments = work_path.split("/")
                         star_idx = next((i for i, s in enumerate(path_segments) if "*" in s), None)
                         if star_idx is not None and star_idx > 0:
                             base_api_path = "/".join(path_segments[:star_idx])
@@ -1372,7 +1510,16 @@ def api_remote_api():
                         row_data[p] = f"Failed: {data_or_err}"
                 return idx, row_data
             else:
-                success, data_or_err = _call_router_api(t["ip"], t["port"], t["username"], t["password"], method, paths[0], payload)
+                resolved, var_err = _resolve_path_variables(
+                    paths[0], t["ip"], t["port"], t["username"], t["password"]
+                )
+                if var_err:
+                    return idx, {
+                        "ip": t["ip"],
+                        "hostname": t["hostname"] or "-",
+                        "result": f"Failed: {var_err}"
+                    }
+                success, data_or_err = _call_router_api(t["ip"], t["port"], t["username"], t["password"], method, resolved, payload)
                 return idx, {
                     "ip": t["ip"],
                     "hostname": t["hostname"] or "-",
@@ -1638,7 +1785,7 @@ def _fetch_router_info(ip, port, username, password, timeout=10, retries=0):
     Handles both wrapped {"data": {...}} and direct response formats.
     retries: number of retries on failure (0 = 1 attempt, 1 = 2 attempts, etc.)
     """
-    result = {"hostname": "", "mac_address": "", "serial_number": "", "product_name": "", "ncos": ""}
+    result = {"hostname": "", "mac_address": "", "serial_number": "", "product_name": "", "ncos": "", "description": "", "asset_id": ""}
     base = f"http://{ip}:{port}" if ":" not in str(ip) else f"http://{ip}"
     auth = (username, password)
 
@@ -1685,12 +1832,22 @@ def _fetch_router_info(ip, port, username, password, timeout=10, retries=0):
         result["serial_number"] = serial_num
 
         system_id = ""
+        description = ""
+        asset_id = ""
         try:
-            r2 = requests.get(f"{base}/api/config/system/system_id", auth=auth, verify=False, timeout=timeout)
+            r2 = requests.get(f"{base}/api/config/system", auth=auth, verify=False, timeout=timeout)
             if r2.status_code < 300:
-                d = r2.json()
-                sid = d.get("data", "") if isinstance(d, dict) else ""
-                system_id = str(sid or "").strip()
+                cfg = _unwrap(r2.json() or {})
+                if isinstance(cfg, dict):
+                    system_id = str(cfg.get("system_id") or "").strip()
+                    description = str(cfg.get("desc") or cfg.get("description") or "").strip()
+                    asset_id = str(cfg.get("asset_id") or "").strip()
+            if not system_id:
+                r2b = requests.get(f"{base}/api/config/system/system_id", auth=auth, verify=False, timeout=timeout)
+                if r2b.status_code < 300:
+                    d = r2b.json()
+                    sid = d.get("data", "") if isinstance(d, dict) else ""
+                    system_id = str(sid or "").strip()
         except Exception:
             pass
 
@@ -1715,6 +1872,8 @@ def _fetch_router_info(ip, port, username, password, timeout=10, retries=0):
             prefix = product_name.split("-")[0].strip() if product_name else ""
             mac_suffix = (mac_raw[-3:] if len(mac_raw) >= 3 else mac_raw).upper()
             result["hostname"] = f"{prefix}-{mac_suffix}" if prefix or mac_suffix else ""
+        result["description"] = description
+        result["asset_id"] = asset_id
         return result
     except Exception:
         return result
@@ -1777,6 +1936,8 @@ def discover_routers():
                 r["serial_number"] = info.get("serial_number", "")
                 r["product_name"] = info.get("product_name", "")
                 r["ncos_version"] = info.get("ncos", "")
+                r["description"] = info.get("description", "")
+                r["asset_id"] = info.get("asset_id", "")
                 discovered.append((ip_res, r, any([info.get("hostname"), info.get("mac_address"), info.get("product_name")])))
     else:
 
@@ -1803,6 +1964,8 @@ def discover_routers():
                     r["serial_number"] = info.get("serial_number", "")
                     r["product_name"] = info.get("product_name", "")
                     r["ncos_version"] = info.get("ncos", "")
+                    r["description"] = info.get("description", "")
+                    r["asset_id"] = info.get("asset_id", "")
                     discovered.append((ip, r, any([info.get("hostname"), info.get("mac_address"), info.get("product_name")])))
                 except Exception:
                     ip = futures[future]
@@ -1860,9 +2023,7 @@ def discover_routers():
     filepath = ROUTERS_DIR / filename
     ensure_folders()
     # Ensure all routers have username, password, port, created_at before persisting
-    routers_to_save = [_normalize_router(r) for r in routers_data]
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump({"routers": routers_to_save}, f, indent=2)
+    _persist_routers_file(filepath)
 
     try:
         cfg = {}
@@ -1883,18 +2044,140 @@ def discover_routers():
     return jsonify(resp)
 
 
-def _collect_api_path_columns(routers):
-    """Collect column names that look like API paths (from Remote API Copy to Routers)."""
-    paths = set()
-    for r in routers:
-        for k in r:
-            if k not in ROUTER_KEYS and "/" in k and len(k) > 2:
-                paths.add(k)
-    return list(paths)
+def _get_value_by_path(obj, path_str):
+    """Extract value by dot+bracket path, e.g. 'devices[0].diagnostics.RSRP'."""
+    if not obj or not path_str or not isinstance(path_str, str):
+        return None
+    path_str = path_str.strip()
+    if not path_str:
+        return None
+    parts = []
+    cur = ""
+    in_bracket = False
+    for c in path_str:
+        if c == "[":
+            if cur:
+                parts.append(cur)
+                cur = ""
+            in_bracket = True
+        elif c == "]":
+            if in_bracket and cur:
+                parts.append(int(cur) if cur.lstrip("-").isdigit() else cur)
+            cur = ""
+            in_bracket = False
+        elif in_bracket:
+            cur += c
+        elif c == ".":
+            if cur:
+                parts.append(cur)
+                cur = ""
+        else:
+            cur += c
+    if cur:
+        parts.append(cur)
+    v = obj
+    for p in parts:
+        if v is None:
+            return None
+        try:
+            v = v[p]
+        except (KeyError, TypeError, IndexError):
+            return None
+    return v
+
+
+def _dot_path_to_api_path(path_str):
+    """Convert dot path to API slash path. 'status.wan' -> 'status/wan'."""
+    if not path_str or not isinstance(path_str, str):
+        return ""
+    s = path_str.strip()
+    parts = []
+    cur = ""
+    for c in s:
+        if c in ".[":
+            if cur:
+                parts.append(cur)
+                cur = ""
+            if c == "[":
+                break
+        else:
+            cur += c
+    if cur:
+        parts.append(cur)
+    return "/".join(parts) if parts else ""
+
+
+def _get_routers_filepath():
+    """Return the path to the current routers file from app config."""
+    filename = "routers.json"
+    if APP_CONFIG_FILE.exists():
+        try:
+            with open(APP_CONFIG_FILE, encoding="utf-8") as f:
+                cfg = json.load(f)
+            if cfg.get("last_file"):
+                filename = cfg["last_file"]
+        except (json.JSONDecodeError, IOError):
+            pass
+    if not filename.lower().endswith(".json"):
+        filename += ".json"
+    return ROUTERS_DIR / filename
+
+
+def _collect_api_path_columns(column_default_paths):
+    """Return API paths dict key -> path from column_default_paths."""
+    if not column_default_paths or not isinstance(column_default_paths, dict):
+        return {}
+    return {k: v for k, v in column_default_paths.items() if v and k not in ROUTER_KEYS}
+
+
+def _persist_routers_file(filepath):
+    """Write routers_data to file, preserving columns/column_default_paths if file exists."""
+    payload = {"routers": [_normalize_router(r) for r in routers_data]}
+    if filepath.exists():
+        try:
+            with open(filepath, encoding="utf-8") as f:
+                existing = json.load(f)
+            if isinstance(existing, dict):
+                payload["columns"] = existing.get("columns", DEFAULT_COLUMNS)
+                payload["column_default_paths"] = existing.get("column_default_paths") or dict(COLUMN_DEFAULT_PATHS)
+        except (json.JSONDecodeError, IOError):
+            pass
+    if "columns" not in payload:
+        payload["columns"] = DEFAULT_COLUMNS
+    if "column_default_paths" not in payload:
+        payload["column_default_paths"] = dict(COLUMN_DEFAULT_PATHS)
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+
+def _path_base_and_remainder(path_str):
+    """Split path like 'status.wan.devices[0].diagnostics.RSRP' into ('status/wan', 'devices[0].diagnostics.RSRP').
+    For slash paths like 'status/product_info/product_name' -> ('status/product_info', 'product_name').
+    """
+    if not path_str:
+        return "", ""
+    normalized = path_str.replace("/", ".")
+    if "[" in normalized:
+        before_bracket = normalized.split("[")[0]
+        segs = before_bracket.split(".")
+        if len(segs) >= 2:
+            base_dot = ".".join(segs[:2])
+            base_slash = base_dot.replace(".", "/")
+            remainder = path_str[len(base_dot) :].lstrip("./")
+            remainder = remainder.replace("/", ".")
+            return base_slash, remainder
+    segs = path_str.replace(".", "/").split("/")
+    if len(segs) >= 2:
+        base = "/".join(segs[:-1])
+        remainder = segs[-1]
+        return base, remainder
+    return path_str.replace(".", "/"), ""
 
 
 def _get_router_info_generator(routers, timeout, retries, api_paths, max_workers):
-    """Generator yielding NDJSON lines for streaming get-router-info progress."""
+    """Generator yielding NDJSON lines for streaming get-router-info progress.
+    api_paths: dict of key -> path (path may be dot+bracket like status.wan.devices[0].diagnostics.RSRP).
+    """
     def fetch_one(r):
         ip = str(r.get("ip_address") or "").strip().split(":")[0]
         if not ip:
@@ -1909,12 +2192,30 @@ def _get_router_info_generator(routers, timeout, retries, api_paths, max_workers
         r["product_name"] = info.get("product_name", "")
         r["ncos_version"] = info.get("ncos", "")
         r["state"] = "Online" if any([info.get("hostname"), info.get("mac_address"), info.get("product_name")]) else r.get("state", "")
-        for path in api_paths:
-            success, data_or_err = _call_router_api(ip, port, username, password, "GET", path)
-            if success:
-                r[path] = json.dumps(data_or_err) if isinstance(data_or_err, (dict, list)) else (str(data_or_err) if data_or_err is not None else "")
-            else:
-                r[path] = f"Failed: {data_or_err}"
+        for key, path in api_paths.items():
+            path = str(path) if path else ""
+            if "{" in path and "}" in path:
+                resolved, var_err = _resolve_path_variables(path, ip, port, username, password, timeout=timeout)
+                if var_err or (resolved and "{" in resolved):
+                    r[key] = f"Failed: {var_err or 'Variable could not be resolved'}"
+                    continue
+                path = resolved
+            api_path, remainder = _path_base_and_remainder(path)
+            if not api_path:
+                api_path = path.replace(".", "/")
+            api_path = _to_slash_path(api_path) if ("." in api_path or "[" in api_path) else api_path
+            try:
+                success, data_or_err = _call_router_api(ip, port, username, password, "GET", api_path)
+                if success:
+                    if remainder and isinstance(data_or_err, (dict, list)):
+                        val = _get_value_by_path(data_or_err, remainder)
+                        r[key] = json.dumps(val) if isinstance(val, (dict, list)) else (str(val) if val is not None else "")
+                    else:
+                        r[key] = json.dumps(data_or_err) if isinstance(data_or_err, (dict, list)) else (str(data_or_err) if data_or_err is not None else "")
+                else:
+                    r[key] = f"Failed: {data_or_err}"
+            except Exception:
+                r[key] = "Failed: error"
         return ip, r, any([info.get("hostname"), info.get("mac_address"), info.get("product_name")])
 
     results = []
@@ -1971,8 +2272,7 @@ def _get_router_info_generator(routers, timeout, retries, api_paths, max_workers
             filename += ".json"
         filepath = ROUTERS_DIR / filename
         try:
-            with open(filepath, "w", encoding="utf-8") as f:
-                json.dump({"routers": [_normalize_router(r) for r in routers_data]}, f, indent=2)
+            _persist_routers_file(filepath)
         except IOError:
             pass
 
@@ -1991,7 +2291,8 @@ def get_router_info():
     cfg = _load_app_config()
     timeout = cfg.get("connection_timeout", 2)
     retries = cfg.get("connection_retries", 1)
-    api_paths = _collect_api_path_columns(routers)
+    column_default_paths = data.get("column_default_paths") or {}
+    api_paths = _collect_api_path_columns(column_default_paths)
     stream_mode = data.get("stream") or request.args.get("stream") == "1"
 
     if stream_mode:
@@ -2017,12 +2318,30 @@ def get_router_info():
         r["product_name"] = info.get("product_name", "")
         r["ncos_version"] = info.get("ncos", "")
         r["state"] = "Online" if any([info.get("hostname"), info.get("mac_address"), info.get("product_name")]) else r.get("state", "")
-        for path in api_paths:
-            success, data_or_err = _call_router_api(ip, port, username, password, "GET", path)
-            if success:
-                r[path] = json.dumps(data_or_err) if isinstance(data_or_err, (dict, list)) else (str(data_or_err) if data_or_err is not None else "")
-            else:
-                r[path] = f"Failed: {data_or_err}"
+        for key, path in api_paths.items():
+            path = str(path) if path else ""
+            if "{" in path and "}" in path:
+                resolved, var_err = _resolve_path_variables(path, ip, port, username, password, timeout=timeout)
+                if var_err or (resolved and "{" in resolved):
+                    r[key] = f"Failed: {var_err or 'Variable could not be resolved'}"
+                    continue
+                path = resolved
+            api_path, remainder = _path_base_and_remainder(path)
+            if not api_path:
+                api_path = path.replace(".", "/")
+            api_path = _to_slash_path(api_path) if ("." in api_path or "[" in api_path) else api_path
+            try:
+                success, data_or_err = _call_router_api(ip, port, username, password, "GET", api_path)
+                if success:
+                    if remainder and isinstance(data_or_err, (dict, list)):
+                        val = _get_value_by_path(data_or_err, remainder)
+                        r[key] = json.dumps(val) if isinstance(val, (dict, list)) else (str(val) if val is not None else "")
+                    else:
+                        r[key] = json.dumps(data_or_err) if isinstance(data_or_err, (dict, list)) else (str(data_or_err) if data_or_err is not None else "")
+                else:
+                    r[key] = f"Failed: {data_or_err}"
+            except Exception:
+                r[key] = "Failed: error"
         return ip, r, any([info.get("hostname"), info.get("mac_address"), info.get("product_name")])
 
     max_workers = _get_max_workers(len(routers), "get_router_info")
@@ -2063,8 +2382,7 @@ def get_router_info():
             filename += ".json"
         filepath = ROUTERS_DIR / filename
         try:
-            with open(filepath, "w", encoding="utf-8") as f:
-                json.dump({"routers": [_normalize_router(r) for r in routers_data]}, f, indent=2)
+            _persist_routers_file(filepath)
         except IOError:
             pass
 
@@ -2195,9 +2513,7 @@ def deploy():
             filename += ".json"
         filepath = ROUTERS_DIR / filename
         ensure_folders()
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump({"routers": [_normalize_router(r) for r in routers_data]}, f, indent=2)
-
+        _persist_routers_file(filepath)
         return jsonify({"ok": True, "routers": list(routers_data)})
 
 

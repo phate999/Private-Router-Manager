@@ -57,10 +57,20 @@
       <div class="routers-editor-wrap">
         <div class="routers-pagination routers-pagination-top" id="routersPaginationTop"></div>
         <div class="routers-table-wrap" id="routersTableWrap">
-          <table class="routers-table" id="routersTable">
-            <thead id="routersHead"></thead>
-            <tbody id="routersBody"></tbody>
-          </table>
+          <div class="routers-table-split">
+            <div class="routers-table-fixed-col">
+              <table class="routers-table routers-table-select" id="routersTableSelect">
+                <thead id="routersHeadSelect"></thead>
+                <tbody id="routersBodySelect"></tbody>
+              </table>
+            </div>
+            <div class="routers-table-scroll" id="routersTableScroll">
+              <table class="routers-table" id="routersTable">
+                <thead id="routersHead"></thead>
+                <tbody id="routersBody"></tbody>
+              </table>
+            </div>
+          </div>
         </div>
         <div class="routers-pagination routers-pagination-bottom" id="routersPaginationBottom"></div>
       </div>
@@ -213,12 +223,12 @@
                 </select>
               </div>
               <div class="remote-api-row" id="remoteApiPathsRow">
-                <label for="remoteApiPaths">Paths (comma, space, or line separated; use * for wildcards)</label>
-                <textarea id="remoteApiPaths" rows="3" placeholder="status/wan/devices/mdm*/diagnostics/dbm&#10;status/system/sdk/apps/*/app/name" title="Use * for wildcard: fetches path before *, then expands. * = all keys. mdm* = keys starting with mdm. E.g. status/wan/devices/mdm*/diagnostics gets status/wan/devices, filters to mdm* devices, returns each diagnostics."></textarea>
+                <label for="remoteApiPaths">Paths (dot.bracket or slash.bracket; * = wildcard, {path} = variable)</label>
+                <textarea id="remoteApiPaths" rows="3" placeholder="status.wan.devices[mdm*].diagnostics.dbm&#10;status.wan.devices.{status.wan.primary_device}.stats&#10;status/lan/[0]" title="Dot: status.wan.devices[0].diagnostics. Slash: status/lan/[0]. Variable {path}: fetches path first, substitutes value (every call). E.g. status.wan.devices.{status.wan.primary_device}.stats"></textarea>
               </div>
               <div class="remote-api-row" id="remoteApiPathRow" style="display: none;">
-                <label for="remoteApiPath">Path</label>
-                <input type="text" id="remoteApiPath" placeholder="e.g. config/gps">
+                <label for="remoteApiPath">Path (dot.bracket or slash.bracket; {path} = variable)</label>
+                <input type="text" id="remoteApiPath" placeholder="e.g. config.gps or status.wan.devices.{status.wan.primary_device}.stats" title="Dot: status.wan.devices[0]. Slash: status/lan/[0]. Variable {path}: fetches path first, substitutes value on every call.">
               </div>
               <div class="remote-api-row" id="remoteApiPayloadRow" style="display: none;">
                 <label for="remoteApiPayload">Payload (JSON)</label>
@@ -291,12 +301,12 @@
       <p class="modal-hint">Enter IP subnet (e.g. 192.168.1.0/24) or range (e.g. 192.168.1.1-10)</p>
       <label for="discoverIpRange">IP Subnet or Range</label>
       <input type="text" id="discoverIpRange" placeholder="192.168.1.0/24 or 192.168.1.1-10">
+      <label for="discoverPort">Port</label>
+      <input type="number" id="discoverPort" value="8080" min="1" max="65535" placeholder="8080">
       <label for="discoverUsername">Username</label>
       <input type="text" id="discoverUsername" value="admin" placeholder="admin">
       <label for="discoverPassword">Password</label>
       <input type="password" id="discoverPassword" placeholder="Password">
-      <label for="discoverPort">Port</label>
-      <input type="number" id="discoverPort" value="8080" min="1" max="65535" placeholder="8080">
       <div class="modal-actions">
         <button type="button" class="btn btn-secondary" id="btnDiscoverCancel">Cancel</button>
         <button type="button" class="btn btn-primary" id="btnDiscoverSubmit">Discover</button>

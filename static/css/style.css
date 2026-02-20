@@ -12,6 +12,10 @@
   --border: #30363d;
   --success: #3fb950;
   --error: #f85149;
+  --signal-red: #dc3545;
+  --signal-orange: #fd7e14;
+  --signal-yellow: #ffc107;
+  --signal-green: #28a745;
   --radius: 8px;
   --shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
 }
@@ -261,7 +265,8 @@ body:has(.drawer.expanded) .main {
 
 .routers-table-locked td:not(.col-select) input {
   pointer-events: none;
-  background: var(--bg);
+  background: transparent !important;
+  border-color: transparent !important;
   cursor: default;
 }
 
@@ -271,12 +276,56 @@ body:has(.drawer.expanded) .main {
 }
 
 .col-select {
-  width: 2.75rem;
-  min-width: 2.75rem;
-  max-width: 2.75rem;
-  padding: 0.25rem;
+  width: 3rem;
+  min-width: 3rem;
+  max-width: 3rem;
+  padding: 0.65rem 0.5rem 0.65rem 0.35rem;
   text-align: center;
   vertical-align: middle;
+  box-sizing: border-box;
+}
+
+/* When unlocked: match data cell vertical padding for alignment */
+.routers-table-wrap:not(.routers-table-locked) .col-select {
+  padding: 0.55rem 0.5rem 0.55rem 0.35rem;
+}
+
+.routers-table thead th.col-select {
+  background: var(--bg-input);
+}
+
+.routers-table tbody td.col-select {
+  background: var(--bg-card);
+}
+
+.routers-table tbody tr:hover td.col-select {
+  background: var(--bg-card);
+}
+
+.routers-table-fixed-col .routers-table {
+  table-layout: fixed;
+  width: 3rem;
+  border-spacing: 0 0.65rem;
+}
+
+.routers-table-fixed-col .routers-table thead th.col-select,
+.routers-table-fixed-col .routers-table tbody td.col-select {
+  border-right: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.routers-table-fixed-col .routers-table tbody tr.routers-row-has-expansion td.col-select {
+  border-radius: var(--radius) !important;
+  border-bottom: 1px solid var(--border);
+}
+
+.routers-expanded-cell-placeholder {
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  vertical-align: top;
+  min-height: 80px;
+  box-shadow: none !important;
 }
 
 .col-select input[type="checkbox"] {
@@ -406,15 +455,35 @@ body:has(.drawer.expanded) .main {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  overflow-x: auto;
+  overflow-x: hidden;
   padding: 0 0.5rem;
+}
+
+.routers-table-split {
+  display: flex;
+  flex-direction: row;
+  min-height: min-content;
+}
+
+.routers-table-fixed-col {
+  flex-shrink: 0;
+  overflow: visible;
+  z-index: 2;
+  margin-right: 0.25rem;
+}
+
+.routers-table-scroll {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .routers-table {
   width: 100%;
   table-layout: fixed;
   border-collapse: separate;
-  border-spacing: 0 0.5rem;
+  border-spacing: 0 0.65rem;
   font-size: 0.875rem;
 }
 
@@ -436,6 +505,35 @@ body:has(.drawer.expanded) .main {
   white-space: nowrap;
   border-bottom: none;
   box-shadow: 0 1px 0 var(--border);
+}
+
+.routers-col-name-input {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: inherit;
+  font-weight: inherit;
+  font-size: inherit;
+  padding: 0.15rem 0.35rem;
+  width: 100%;
+  min-width: 4ch;
+  max-width: calc(100% - 2.5rem);
+  box-sizing: border-box;
+}
+
+.routers-col-name-input:hover {
+  border-color: var(--border);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+body.light-mode .routers-col-name-input:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.routers-col-name-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--bg-card);
 }
 
 .routers-table thead th:first-child {
@@ -497,6 +595,27 @@ body:has(.drawer.expanded) .main {
   position: relative;
 }
 
+.routers-table th.col-draggable {
+  cursor: grab;
+}
+
+.routers-table th.col-draggable:active {
+  cursor: grabbing;
+}
+
+.routers-table th.col-dragging {
+  opacity: 0.6;
+}
+
+.routers-table th.col-drag-over {
+  box-shadow: inset 0 0 0 2px var(--accent);
+  background: rgba(0, 102, 179, 0.15);
+}
+
+body.light-mode .routers-table th.col-drag-over {
+  background: rgba(0, 102, 179, 0.12);
+}
+
 .routers-table .routers-col-resize {
   position: absolute;
   top: 0;
@@ -519,6 +638,29 @@ body:has(.drawer.expanded) .main {
   border-bottom: 1px solid var(--border);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
   transition: box-shadow 0.15s ease;
+}
+
+.routers-table tbody tr.routers-row-has-expansion td {
+  border-bottom: none;
+  box-shadow: none;
+}
+
+.routers-table tbody tr.routers-row-has-expansion td:first-child {
+  border-radius: var(--radius) 0 0 0;
+  box-shadow: none;
+}
+
+.routers-table tbody tr.routers-row-has-expansion td:last-child {
+  border-radius: 0 var(--radius) 0 0;
+  box-shadow: none;
+}
+
+.routers-table tbody tr.routers-row-has-expansion:hover td {
+  box-shadow: none !important;
+}
+
+body.light-mode .routers-table tbody tr.routers-row-has-expansion td {
+  box-shadow: none !important;
 }
 
 .routers-table tbody tr:hover td {
@@ -658,6 +800,247 @@ body.light-mode .routers-table tbody tr:hover td {
 .routers-table .row-actions {
   min-width: 60px;
   text-align: center;
+}
+
+.routers-row-clickable {
+  cursor: pointer;
+}
+
+.routers-path-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.routers-path-value {
+  font-size: 0.9rem;
+}
+
+.routers-path-value.routers-path-empty {
+  color: var(--text-muted);
+}
+
+.routers-readonly-value {
+  color: var(--text);
+}
+
+.routers-path-input {
+  font-size: 0.75rem;
+  padding: 0.2rem 0.35rem;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  width: 100%;
+  min-width: 0;
+}
+
+.routers-path-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.routers-expanded-row {
+  background: var(--bg-card);
+}
+
+.routers-expanded-row td {
+  padding: 0 !important;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border);
+  border-top: none;
+}
+
+.routers-table.routers-has-expanded {
+  border-spacing: 0 0.15rem;
+}
+
+.routers-table.routers-has-expanded .routers-expanded-row td {
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+  border-top: none;
+}
+
+.routers-expanded-row td.routers-expanded-cell {
+  padding: 0.5rem 1rem 1rem calc(2.2rem + 3.75rem) !important; /* top right bottom left - align cards after select + state columns */
+}
+
+.routers-table-scroll .routers-expanded-cell {
+  padding-left: 3.75rem !important; /* split layout: no select column in data table, only state */
+}
+
+.routers-table.routers-has-expanded .routers-expanded-cell {
+  border-radius: 0 0 var(--radius) var(--radius);
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+}
+
+.routers-wan-cards-wrap {
+  min-height: 60px;
+}
+
+.routers-wan-loading {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  padding: 0.5rem 0;
+}
+
+.routers-wan-sections {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5rem;
+  align-items: flex-start;
+}
+
+.routers-wan-section .routers-wan-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.routers-wan-card {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem 1.25rem;
+  min-width: 140px;
+  min-height: 11rem;
+}
+
+.routers-wan-card-title {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+
+.routers-wan-card.routers-wan-ethernet,
+.routers-wan-card.routers-wan-wifi {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.routers-wan-ethernet-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.25rem;
+}
+
+.routers-wan-icon {
+  flex-shrink: 0;
+  font-size: 1.25rem;
+}
+
+.routers-wan-icon.ethernet-icon.connected,
+.routers-wan-icon.wifi-icon.connected {
+  color: var(--signal-green);
+}
+
+.routers-wan-icon.ethernet-icon.disconnected,
+.routers-wan-icon.wifi-icon.disconnected {
+  color: var(--signal-red);
+}
+
+.routers-wan-card-content {
+  min-width: 0;
+}
+
+.routers-wan-label {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.routers-wan-summary {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-top: 0.25rem;
+}
+
+.routers-wan-card.routers-wan-cellular {
+  min-width: 160px;
+  max-width: 220px;
+  padding: 0.75rem 1rem;
+}
+
+.routers-wan-cell-header {
+  font-weight: 600;
+  font-size: 0.9rem;
+  margin-bottom: 0.35rem;
+}
+
+.routers-wan-meter-label {
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
+  margin-bottom: 0.2rem;
+}
+
+.routers-wan-meter-wrap {
+  height: 8px;
+  background: var(--bg-card);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 0.3rem;
+}
+
+.routers-wan-meter-bar {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.3s ease, background 0.2s ease;
+}
+
+.routers-wan-score {
+  font-size: 0.95rem;
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+}
+
+.routers-wan-score-label {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.routers-wan-sim-line {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin-bottom: 0.25rem;
+}
+
+.routers-wan-cell-stats {
+  font-size: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  color: var(--text-muted);
+}
+
+.routers-wan-cell-stats span {
+  white-space: nowrap;
+}
+
+.routers-wan-stats {
+  margin: 0;
+  font-size: 0.8rem;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.2rem 0.75rem;
+}
+
+.routers-wan-stats dt {
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.routers-wan-stats dd {
+  margin: 0;
+}
+
+.routers-wan-ping-status {
+  font-weight: 600;
 }
 
 .btn-icon {

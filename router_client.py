@@ -113,8 +113,8 @@ async def _call_router_api_async(session, ip, port, username, password, method, 
 
 
 async def _fetch_router_info_async(session, ip, port, username, password, timeout=10):
-    """Fetch hostname, MAC, serial, product_name, NCOS from router API. Returns dict."""
-    result = {"hostname": "", "mac_address": "", "serial_number": "", "product_name": "", "ncos": ""}
+    """Fetch hostname, MAC, serial, product_name, NCOS, description, asset_id from router API. Returns dict."""
+    result = {"hostname": "", "mac_address": "", "serial_number": "", "product_name": "", "ncos": "", "description": "", "asset_id": ""}
     base = f"http://{ip}:{port}" if ":" not in str(ip) else f"http://{ip}"
     auth = aiohttp.BasicAuth(username, password)
     client_timeout = aiohttp.ClientTimeout(total=timeout)
@@ -149,12 +149,22 @@ async def _fetch_router_info_async(session, ip, port, username, password, timeou
         result["serial_number"] = serial_num
 
         system_id = ""
+        description = ""
+        asset_id = ""
         try:
-            async with session.get(f"{base}/api/config/system/system_id", auth=auth, ssl=False, timeout=client_timeout) as r2:
+            async with session.get(f"{base}/api/config/system", auth=auth, ssl=False, timeout=client_timeout) as r2:
                 if r2.status < 300:
-                    d = await r2.json()
-                    sid = d.get("data", "") if isinstance(d, dict) else ""
-                    system_id = str(sid or "").strip()
+                    cfg = _unwrap(await r2.json() or {})
+                    if isinstance(cfg, dict):
+                        system_id = str(cfg.get("system_id") or "").strip()
+                        description = str(cfg.get("desc") or cfg.get("description") or "").strip()
+                        asset_id = str(cfg.get("asset_id") or "").strip()
+            if not system_id:
+                async with session.get(f"{base}/api/config/system/system_id", auth=auth, ssl=False, timeout=client_timeout) as r2b:
+                    if r2b.status < 300:
+                        d = await r2b.json()
+                        sid = d.get("data", "") if isinstance(d, dict) else ""
+                        system_id = str(sid or "").strip()
         except Exception:
             pass
 
@@ -179,6 +189,8 @@ async def _fetch_router_info_async(session, ip, port, username, password, timeou
             prefix = product_name.split("-")[0].strip() if product_name else ""
             mac_suffix = (mac_raw[-3:] if len(mac_raw) >= 3 else mac_raw).upper()
             result["hostname"] = f"{prefix}-{mac_suffix}" if prefix or mac_suffix else ""
+        result["description"] = description
+        result["asset_id"] = asset_id
         return result
     except Exception:
         return result
